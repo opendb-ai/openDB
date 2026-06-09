@@ -44,6 +44,79 @@ if os.environ.get("IMPROVED_PROMPT") == "1":
     B.ANSWER_SYSTEM_PROMPT = IMPROVED_ANSWER_PROMPT
 
 
+# --- Chain-of-Note + category-aware reading (non-model SOTA techniques) ---
+def _category_hint(question: str) -> str:
+    ql = question.lower()
+    if any(t in ql for t in ("when ", "how long", "how many days", "how many weeks",
+                             "how many months", "how many years", " ago", "before ",
+                             "after ", "first time", "last time", "earliest",
+                             "most recent", "what date", "which day", "since ")):
+        return ("This is a TIME question. Use the dated notes: compute durations and "
+                "ordering from the dates, and take the MOST RECENT value as the current one.")
+    if any(t in ql for t in ("how many", "how much", "number of", "count", "total")):
+        return ("This is a COUNTING question. In NOTES, list EVERY distinct matching item "
+                "across all memories, then count them in ANSWER.")
+    if any(t in ql for t in ("prefer", "like", "favorite", "favourite", "enjoy",
+                             "dislike", "hate", "rather", "style", "usually",
+                             "recommend", "suggest", "advice", "help me", "should i")):
+        return ("This is a PREFERENCE question — you must INFER the user's preference "
+                "from their history (tools they use, past choices, complaints, praise) "
+                "and tailor the answer to it. Do NOT abstain: even partial signals are "
+                "enough to state what the user would prefer.")
+    if any(t in ql for t in ("update", "now", "current", "still", "changed", "anymore",
+                             "these days", "latest")):
+        return ("This is a KNOWLEDGE-UPDATE question. If a value changed over time, use the "
+                "LATEST value; ignore superseded older values.")
+    return ("This may require combining facts from MULTIPLE memories — gather all relevant "
+            "notes before answering.")
+
+
+CON_SYSTEM_PROMPT = (
+    "You are a personal AI assistant answering from a user's past-conversation memories "
+    "(each tagged with its session date). Answer in TWO steps:\n"
+    "1) NOTES: go through the memories and write down ONLY the facts relevant to the "
+    "question, each with its date. Skip irrelevant memories. Be exhaustive about relevant ones.\n"
+    "2) ANSWER: give the final answer in one short line, grounded in your notes.\n"
+    "Only answer 'I don't have enough information to answer that.' if NONE of the "
+    "memories are even related to the question — otherwise infer the best answer "
+    "from the relevant notes.\n"
+    "Quote numbers, names, and dates exactly. {hint}\n\n"
+    "Output format:\nNOTES:\n- ...\nANSWER: ..."
+)
+
+
+def _extract_answer(text: str) -> str:
+    if not text:
+        return ""
+    up = text
+    idx = up.rfind("ANSWER:")
+    if idx >= 0:
+        return up[idx + len("ANSWER:"):].strip()
+    return text.strip()
+
+
+async def con_answer(question, mems, model, qdate):
+    if mems:
+        sm = sorted(mems, key=lambda m: B._memory_date(m))
+        mtext = "\n\n---\n\n".join(
+            f"Memory {i} (session date: {B._memory_date(m)}):\n{m.get('content', '')}"
+            for i, m in enumerate(sm, 1))
+        dctx = f"\nToday's date: {qdate}\n" if qdate else ""
+        user_msg = (f"Memories from past conversations:\n\n{mtext}\n\n---\n{dctx}\n"
+                    f"Question: {question}")
+    else:
+        user_msg = f"No relevant memories found.\n\nQuestion: {question}"
+    sys = CON_SYSTEM_PROMPT.format(hint=_category_hint(question))
+    try:
+        resp = await B._llm_client.chat.completions.create(
+            model=model, max_tokens=1400,
+            messages=[{"role": "system", "content": sys},
+                      {"role": "user", "content": user_msg}])
+        return _extract_answer(resp.choices[0].message.content or "")
+    except Exception:
+        return ""
+
+
 # --- self-consistency: sample N answers, reduce to a consensus ---
 REDUCE_PROMPT = (
     "You are given several independent answers to the SAME question, each written "
@@ -147,12 +220,33 @@ async def main():
             b = get_backend()
             try:
                 dates = q.get("haystack_dates", [])
+                chunk = os.environ.get("CHUNK")  # "turns" | "rounds" | None
                 for i, (sid, sess) in enumerate(zip(q["haystack_session_ids"], q["haystack_sessions"])):
                     meta = {"session_id": sid}
                     if i < len(dates):
                         meta["date"] = dates[i]
-                    await b.store_memory(memory_id=str(uuid.uuid4()), content=B.flatten_session(sess),
-                                         memory_type="episodic", tags=[sid], metadata=meta)
+                    if chunk == "rounds":
+                        # Round-level granularity: each user+assistant exchange is
+                        # one memory — finer than a session, but keeps Q/A context
+                        # (unlike single turns). Deterministic.
+                        j = 0
+                        while j < len(sess):
+                            pair = sess[j:j + 2]
+                            txt = "\n".join(f"[{t['role']}] {t['content']}" for t in pair).strip()
+                            if len(txt) > 6:
+                                await b.store_memory(memory_id=str(uuid.uuid4()), content=txt,
+                                                     memory_type="episodic", tags=[sid], metadata=meta)
+                            j += 2
+                    elif chunk == "turns":
+                        for turn in sess:
+                            txt = f"[{turn['role']}] {turn['content']}".strip()
+                            if len(txt) > 6:
+                                await b.store_memory(memory_id=str(uuid.uuid4()), content=txt,
+                                                     memory_type="episodic", tags=[sid], metadata=meta)
+                    else:
+                        await b.store_memory(memory_id=str(uuid.uuid4()), content=B.flatten_session(sess),
+                                             memory_type="episodic", tags=[sid], metadata=meta)
+                mems = None
                 additive = os.environ.get("ADDITIVE_CONSOLIDATE") == "1"
                 use_kg = os.environ.get("KG") == "1"
                 ql = q["question"].lower()
@@ -167,7 +261,13 @@ async def main():
                                                 tags=None, limit=args.recall_limit, offset=0)
                     return r.get("results", [])
 
-                if args.consolidate and use_kg:
+                # Baseline: full-context — feed the ENTIRE haystack, no retrieval
+                # (theoretical upper bound for any memory system, same reader).
+                if os.environ.get("FULLCTX") == "1":
+                    listing = await b.list_memories(memory_type=None, tags=None,
+                                                    limit=100000, offset=0)
+                    mems = listing.get("memories", [])
+                elif args.consolidate and use_kg:
                     # KG: raw top-K + a deterministic bi-temporal KG timeline.
                     from opendb_core.temporal_kg import build_kg, render_facts
                     mems = await _recall_raw()
@@ -197,7 +297,9 @@ async def main():
                     mems = await _recall_raw()
             finally:
                 await close_backend(str(db))
-            if args.votes > 1:
+            if os.environ.get("CON") == "1":
+                ans = await con_answer(q["question"], mems, model, q.get("question_date", ""))
+            elif args.votes > 1:
                 ans = await consensus_answer(q["question"], mems, model,
                                              q.get("question_date", ""), args.votes)
             else:
