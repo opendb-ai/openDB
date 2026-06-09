@@ -368,6 +368,46 @@ don't have.
 
 ---
 
+## Part 9: Hybrid Recall — Semantic Recall (optional, local vectors)
+
+> Pure FTS is unbeatable on exact identifiers but blind to **paraphrase**: a
+> query that shares no keywords with the stored answer. OpenDB's optional
+> hybrid mode adds a **local** dense-vector leg (zero API) and fuses it
+> FTS-first, so exact-match ranking never regresses while semantic recall is
+> recovered. Enable with `pip install "open-db[hybrid]"` +
+> `FILEDB_MEMORY_RETRIEVAL_MODE=hybrid`. Embedder: a retrieval-tuned static
+> model (`model2vec`) — no GPU, no torch/onnx, no network at query time.
+
+### Semantic-recall benchmark (40 paraphrase pairs, zero lexical overlap, + distractors)
+
+| Mode | R@1 | R@3 | R@5 | R@10 | Median recall |
+|---|:-:|:-:|:-:|:-:|:-:|
+| Pure FTS | 0.0% | 0.0% | 0.0% | **0.0%** | 0.3 ms |
+| **Hybrid (FTS + local vectors)** | 22.5% | 52.5% | 75.0% | **90.0%** | 1.1 ms |
+
+Pure FTS scores a literal **zero** here — these queries share no words with the
+answer by construction. Hybrid recovers **+90 points at R@10**, still entirely
+local and sub-2 ms. (Run: `python benchmark/semantic_recall_bench.py`.)
+
+### No regression on exact-match workloads (FTS-first fusion)
+
+The vector leg only *appends* candidates FTS missed — it never reorders FTS
+hits. Re-running the keyword-heavy suites in hybrid mode:
+
+| Benchmark | FTS (default) R@5 | Hybrid R@5 |
+|---|:-:|:-:|
+| LongMemEval retrieval | 100% | **100%** |
+| CodeMemEval retrieval | 100% | **100%** |
+
+This is the classic-RRF pitfall avoided: naive equal-weight fusion let vector
+noise outrank exact identifiers and dropped CodeMemEval R@5 to 37.5%; FTS-first
+fusion keeps it at 100% while still adding the semantic tail.
+
+> Default remains pure FTS — zero extra dependencies, unchanged behavior.
+> Hybrid is strictly opt-in.
+
+---
+
 ## Applicability Boundaries
 
 ### When FileDB (FTS) is the right choice

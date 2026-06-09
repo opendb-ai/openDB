@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     memory_stability_days: float = 30.0  # FSRS stability: days for confidence to drop to 0.9
     memory_confidence_threshold: float = 0.3  # below this, memory fades out of recall
 
+    # --- Optional hybrid recall (FTS + local dense vectors via RRF) ---
+    # "fts" (default): pure SQLite FTS5, zero extra deps. "hybrid": also build a
+    # local vector index and fuse with Reciprocal Rank Fusion. Requires
+    # `pip install "open-db[hybrid]"`.
+    memory_retrieval_mode: str = "fts"  # "fts" | "hybrid"
+    memory_embed_model: str = "minishlab/potion-retrieval-32M"  # local retrieval-tuned static embedder
+    memory_rrf_k: int = 60  # RRF damping constant (standard default)
+    memory_vector_candidates: int = 60  # KNN candidates pulled from the vector leg
+
     # Evaluation capture (opt-in): records real search/recall traffic for offline analysis
     eval_capture_enabled: bool = False
 

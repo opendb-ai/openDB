@@ -122,6 +122,25 @@ No embeddings. No vector search. No graph databases. Three things:
 
 Full methodology and per-question results: [benchmark/REPORT.md](benchmark/REPORT.md)
 
+### Optional: hybrid recall for paraphrased queries
+
+Pure FTS is unbeatable on exact identifiers but blind to wording it has never
+seen — a query like *"which UI framework do we use now"* against a memory that
+says *"migrated the frontend to Svelte"*. Turn on **hybrid mode** to add a
+**local** dense-vector leg (still zero API, still milliseconds) fused *FTS-first*
+so exact-match ranking never regresses:
+
+```bash
+pip install "open-db[hybrid]"
+export FILEDB_MEMORY_RETRIEVAL_MODE=hybrid   # default stays pure FTS
+```
+
+On a zero-lexical-overlap paraphrase benchmark, pure FTS scores **0%** and
+hybrid reaches **90% R@10** — while LongMemEval and CodeMemEval retrieval stay
+at **100% R@5** (no regression). Embeddings are computed locally with a
+retrieval-tuned static model (`model2vec`): no GPU, no torch, no embedding API.
+See [REPORT.md → Part 9](benchmark/REPORT.md).
+
 ## Works with Every Agent Framework
 
 OpenDB speaks [MCP](https://modelcontextprotocol.io/) — the universal standard supported by all major frameworks. Pick yours:
