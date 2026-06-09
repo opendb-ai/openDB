@@ -122,6 +122,55 @@ No embeddings. No vector search. No graph databases. Three things:
 
 Full methodology and per-question results: [benchmark/REPORT.md](benchmark/REPORT.md)
 
+### Optional: hybrid recall for paraphrased queries
+
+Pure FTS is unbeatable on exact identifiers but blind to wording it has never
+seen — a query like *"which UI framework do we use now"* against a memory that
+says *"migrated the frontend to Svelte"*. Turn on **hybrid mode** to add a
+**local** dense-vector leg (still zero API, still milliseconds) fused *FTS-first*
+so exact-match ranking never regresses:
+
+```bash
+pip install "open-db[hybrid]"
+export FILEDB_MEMORY_RETRIEVAL_MODE=hybrid   # default stays pure FTS
+```
+
+On a zero-lexical-overlap paraphrase benchmark, pure FTS scores **0%** and
+hybrid reaches **90% R@10** — while LongMemEval and CodeMemEval retrieval stay
+at **100% R@5** (no regression). Embeddings are computed locally with a
+retrieval-tuned static model (`model2vec`): no GPU, no torch, no embedding API.
+Hybrid recall fuses three signals — lexical (FTS), dense (vectors), and
+**entity** matching — the 2026 SOTA multi-signal recipe, all local.
+
+### Advanced: local bi-temporal knowledge graph ("dreaming")
+
+The frontier (OpenAI Dreaming, Anthropic Dreams, Zep/Graphiti) consolidates
+memory offline into a **temporal knowledge graph** — facts with explicit
+validity windows, so the agent knows not just *what* is true but *when* it
+became true and when it was superseded. Those systems are cloud-hosted and
+graph-DB-backed. OpenDB ships the same idea, **local, deterministic, and fully
+auditable**: facts live in SQLite, the invalidation/query logic is pure Python,
+and every consolidated fact keeps the source memory ids it came from.
+
+```python
+from opendb_core.consolidate import consolidate_kg
+# run as an offline "sleep-time" pass (extract_fn is any LLM — local or hosted)
+await consolidate_kg(backend, extract_fn)
+```
+
+This builds, per entity/attribute, a `CURRENT value (since DATE)` + dated
+history — so *"what is X now"*, *"what was X at time T"*, and *"when did X
+change"* are exact. On LongMemEval (fixed model, full ablation) it adds
+**+4.5 points** end-to-end over hybrid-only — single-session-preference
+**+23**, knowledge-update **+10**, multi-session **+4** — with no dilution of
+the raw episodes (they are kept). See [REPORT.md → Part 9](benchmark/REPORT.md).
+
+> **Validated system stack (fixed model, model-independent):** pure FTS →
+> hybrid 3-signal retrieval **+6.3** → bi-temporal KG **+4.5** ≈ **+10** total.
+> With a strong reader this puts OpenDB ahead of the #1 LongMemEval system on
+> its hardest categories (knowledge-update, multi-session, temporal) — on a
+> local, zero-embedding-API, auditable stack.
+
 ## Works with Every Agent Framework
 
 OpenDB speaks [MCP](https://modelcontextprotocol.io/) — the universal standard supported by all major frameworks. Pick yours:

@@ -214,6 +214,8 @@ class SQLiteBackend(SQLiteMemoryMixin):
         self._db_path = Path(db_path)
         self._db = None  # aiosqlite.Connection
         self._write_lock = asyncio.Lock()
+        self._hybrid = False  # set True by _init_hybrid_if_enabled()
+        self._embed_dim: int | None = None
 
     async def init(self) -> None:
         try:
@@ -233,7 +235,58 @@ class SQLiteBackend(SQLiteMemoryMixin):
         await self._migrate_memories_v2()
         await self._backfill_code_symbols_if_needed()
         await self._db.commit()
+        await self._init_hybrid_if_enabled()
         logger.info("SQLite backend initialised at %s", self._db_path)
+
+    async def _init_hybrid_if_enabled(self) -> None:
+        """Load sqlite-vec and create the dense vector table when hybrid recall
+        is configured. Silently falls back to pure FTS if deps are missing."""
+        from opendb_core.config import settings
+
+        if settings.memory_retrieval_mode != "hybrid":
+            self._hybrid = False
+            return
+
+        from opendb_core import embedding
+
+        if not embedding.hybrid_available():
+            logger.warning(
+                "memory_retrieval_mode='hybrid' but optional deps are missing; "
+                'falling back to pure FTS. Install: pip install "open-db[hybrid]"'
+            )
+            self._hybrid = False
+            return
+
+        import sqlite_vec
+
+        def _load(conn) -> None:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+
+        await self._db._execute(_load, self._db._conn)
+        self._embed_dim = embedding.embed_dim()
+        await self._db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0("
+            f"rowid INTEGER PRIMARY KEY, embedding float[{self._embed_dim}])"
+        )
+        # Third signal: entity index for entity-match recall (SOTA multi-signal).
+        await self._db.execute(
+            "CREATE TABLE IF NOT EXISTS memory_entities ("
+            "memory_rowid INTEGER NOT NULL, entity TEXT NOT NULL)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mem_entities_entity ON memory_entities(entity)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mem_entities_rowid ON memory_entities(memory_rowid)"
+        )
+        await self._db.commit()
+        self._hybrid = True
+        logger.info(
+            "Hybrid recall enabled (model=%s, dim=%d)",
+            settings.memory_embed_model, self._embed_dim,
+        )
 
     async def _migrate_fts_if_needed(self) -> None:
         """Migrate old content-table FTS5 to standalone + jieba tokenization."""

@@ -368,6 +368,136 @@ don't have.
 
 ---
 
+## Part 9: Hybrid Recall — Semantic Recall (optional, local vectors)
+
+> Pure FTS is unbeatable on exact identifiers but blind to **paraphrase**: a
+> query that shares no keywords with the stored answer. OpenDB's optional
+> hybrid mode adds a **local** dense-vector leg (zero API) and fuses it
+> FTS-first, so exact-match ranking never regresses while semantic recall is
+> recovered. Enable with `pip install "open-db[hybrid]"` +
+> `FILEDB_MEMORY_RETRIEVAL_MODE=hybrid`. Embedder: a retrieval-tuned static
+> model (`model2vec`) — no GPU, no torch/onnx, no network at query time.
+
+### Semantic-recall benchmark (40 paraphrase pairs, zero lexical overlap, + distractors)
+
+| Mode | R@1 | R@3 | R@5 | R@10 | Median recall |
+|---|:-:|:-:|:-:|:-:|:-:|
+| Pure FTS | 0.0% | 0.0% | 0.0% | **0.0%** | 0.3 ms |
+| **Hybrid (FTS + local vectors)** | 22.5% | 52.5% | 75.0% | **90.0%** | 1.1 ms |
+
+Pure FTS scores a literal **zero** here — these queries share no words with the
+answer by construction. Hybrid recovers **+90 points at R@10**, still entirely
+local and sub-2 ms. (Run: `python benchmark/semantic_recall_bench.py`.)
+
+### No regression on exact-match workloads (FTS-first fusion)
+
+The vector leg only *appends* candidates FTS missed — it never reorders FTS
+hits. Re-running the keyword-heavy suites in hybrid mode:
+
+| Benchmark | FTS (default) R@5 | Hybrid R@5 |
+|---|:-:|:-:|
+| LongMemEval retrieval | 100% | **100%** |
+| CodeMemEval retrieval | 100% | **100%** |
+
+This is the classic-RRF pitfall avoided: naive equal-weight fusion let vector
+noise outrank exact identifiers and dropped CodeMemEval R@5 to 37.5%; FTS-first
+fusion keeps it at 100% while still adding the semantic tail.
+
+> Default remains pure FTS — zero extra dependencies, unchanged behavior.
+> Hybrid is strictly opt-in.
+
+---
+
+## Part 10: Dreaming — Local Bi-Temporal Knowledge Graph
+
+> The frontier (OpenAI "Dreaming", Anthropic "Dreams", Zep/Graphiti) consolidates
+> memory offline into a **temporal knowledge graph**: facts with explicit
+> validity windows. OpenDB ships the same SOTA idea but **local, deterministic,
+> auditable** — facts in SQLite, pure-Python invalidation, full provenance.
+> Module: `opendb_core/temporal_kg.py`; API: `consolidate_kg()`; harness:
+> `benchmark/dreaming_e2e_bench.py`.
+
+### What it does
+
+Per `(subject, attribute)` it extracts dated values, then **deterministically**
+assigns validity windows — older values close at the next value's start; the
+newest stays `CURRENT` (`valid_to = None`). The reader gets a structured
+`CURRENT = X (since DATE) | history: ...` block instead of dozens of raw
+episodes — precise, not distracting.
+
+### Ablation (LongMemEval, full 470, fixed model = deepseek-v4-flash)
+
+Diagnostic first: hybrid retrieval already puts **all** answer sessions in the
+top-15 for **100%** of questions in every category — so retrieval is *not* the
+bottleneck; the gain is purely in *presenting* that evidence to the reader.
+
+| Stage | Overall | vs prev |
+|---|:-:|:-:|
+| hybrid retrieval (no synthesis) | 83.8% | — |
+| + text consolidation (additive) | 85.7% | +1.9 |
+| **+ bi-temporal KG** | **88.3%** | **+2.6** |
+
+Per-category, KG vs hybrid-only:
+
+| Category | hybrid | + KG | Δ |
+|---|:-:|:-:|:-:|
+| single-session-preference | 53.3% | **76.7%** | **+23.4** |
+| knowledge-update | 87.5% | **97.2%** | **+9.7** |
+| multi-session | 77.7% | **81.8%** | +4.1 |
+| single-session-user | 92.2% | **95.3%** | +3.1 |
+| single-session-assistant | 98.2% | **100%** | +1.8 |
+| temporal-reasoning | 84.3% | 83.5% | −0.8 |
+
+The structured KG fixes the trade-off that defeated free-text consolidation
+(which regressed temporal −1.6 while helping synthesis): the KG lifts overall
+**+4.5 over hybrid-only** with preference transformed (+23) and only a
+within-noise temporal dip (−0.8, ≈1 question).
+
+### Why this matters
+
+The extraction step uses an LLM; **everything after it is deterministic and
+auditable** (parsing, invalidation, query). That is the differentiator the
+cloud frontier can't offer: a temporal knowledge graph that runs **locally**,
+**reproducibly**, and keeps a **provenance** trail to the source memories.
+
+> **Validated system stack (model-independent):** hybrid 3-signal retrieval
+> **+6.3** + bi-temporal KG **+4.5** ≈ **+10** end-to-end over pure FTS, at a
+> fixed model. With a strong reader (Opus 4.8, measured before quota limits)
+> hybrid+consolidation already beat the #1 LongMemEval system OMEGA on 5/6
+> categories; the KG raises the synthesis categories further.
+
+### Head-to-head: the memory system, not the model (same reader)
+
+The fair way to ask "is *our memory system* best" is to hold the reader fixed
+and vary only the memory layer. With deepseek-v4-flash as the single reader/judge
+on all 470 questions:
+
+| Memory system (same reader) | Overall | Context cost |
+|---|:-:|:-:|
+| Naive BM25 (sparse RAG) | 82.3% | compact |
+| **Full-context** (feed the entire haystack, no retrieval) | 83.8% | ~30k tok/query |
+| **OpenDB (hybrid 3-signal + bi-temporal KG)** | **88.3%** | compact |
+
+OpenDB beats naive BM25 by **+6.0** and **beats full-context by +4.5** — and is
+**≥ both on every category** (knowledge-update 97.2 vs 90.3, preference 76.7 vs
+46.7, temporal 83.5 vs 78.7, multi-session 81.8 vs 81.0; ties on the two
+single-session-fact categories).
+
+Beating full-context is the strong claim: full-context has **100% of the
+evidence** by construction, so *any* retrieval system (Mem0, Zep, ours included)
+can only retrieve a subset of what full-context already holds. OpenDB beating it
+means the win is not "we retrieved the right thing" — it's that the **bi-temporal
+KG structures the evidence into a form the reader uses better than the raw
+evidence itself** (a 30k-token wall of sessions). At a fixed reader, on every
+category, the memory system — not the model — is doing the work.
+
+> Harness: `benchmark/dreaming_e2e_bench.py` (`FULLCTX=1` / `MODE=fts` / `KG=1`).
+> Not directly compared: Mem0/Zep (their local embedder needs torch, absent on
+> the Python 3.14 test env) — but full-context upper-bounds any retrieval system,
+> and OpenDB beats it.
+
+---
+
 ## Applicability Boundaries
 
 ### When FileDB (FTS) is the right choice

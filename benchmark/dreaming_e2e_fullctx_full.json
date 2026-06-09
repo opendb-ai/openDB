@@ -1,0 +1,65 @@
+{
+ "config": "hybrid",
+ "model": "deepseek/deepseek-v4-flash",
+ "overall": 83.8,
+ "n": 470,
+ "by_type": {
+  "knowledge-update": {
+   "acc": 90.3,
+   "correct": 65,
+   "count": 72,
+   "published": {
+    "OMEGA": 96,
+    "Supermemory": 88.5,
+    "Zep": 83.3
+   }
+  },
+  "multi-session": {
+   "acc": 81.0,
+   "correct": 98,
+   "count": 121,
+   "published": {
+    "OMEGA": 83,
+    "Supermemory": 71.4,
+    "Zep": 57.9
+   }
+  },
+  "single-session-assistant": {
+   "acc": 100.0,
+   "correct": 56,
+   "count": 56,
+   "published": {
+    "Supermemory": 96.4,
+    "Zep": 80.4
+   }
+  },
+  "single-session-preference": {
+   "acc": 46.7,
+   "correct": 14,
+   "count": 30,
+   "published": {
+    "Supermemory": 70.0,
+    "Zep": 56.7
+   }
+  },
+  "single-session-user": {
+   "acc": 95.3,
+   "correct": 61,
+   "count": 64,
+   "published": {
+    "Supermemory": 97.1,
+    "Zep": 92.9
+   }
+  },
+  "temporal-reasoning": {
+   "acc": 78.7,
+   "correct": 100,
+   "count": 127,
+   "published": {
+    "OMEGA": 94,
+    "Supermemory": 76.7,
+    "Zep": 62.4
+   }
+  }
+ }
+}

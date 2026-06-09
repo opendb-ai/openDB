@@ -153,6 +153,7 @@ class SQLiteMemoryMixin:
                     content, memory_type, threshold=0.3,
                 )
 
+            vec_rowid: int | None = None
             await self._db.execute("BEGIN")
             try:
                 if conflict_id is not None:
@@ -171,6 +172,7 @@ class SQLiteMemoryMixin:
                         "UPDATE memories_fts SET content = ? WHERE rowid = ?",
                         (tokenize_for_fts(content), conflict_id),
                     )
+                    vec_rowid = conflict_id
                 else:
                     # Normal insert
                     await self._db.execute(
@@ -191,10 +193,15 @@ class SQLiteMemoryMixin:
                         "INSERT INTO memories_fts(rowid, content) VALUES (?, ?)",
                         (rowid, tokenize_for_fts(content)),
                     )
+                    vec_rowid = rowid
                 await self._db.execute("COMMIT")
             except aiosqlite.DatabaseError:
                 await self._db.execute("ROLLBACK")
                 raise
+
+            # Hybrid: keep the dense vector index in sync with this memory.
+            if getattr(self, "_hybrid", False) and vec_rowid is not None:
+                await self._write_memory_vector(vec_rowid, content)
 
         # Return the stored record
         return await self.get_memory(memory_id)  # type: ignore[return-value]
@@ -238,6 +245,25 @@ class SQLiteMemoryMixin:
         if pinned_only:
             return await self._list_pinned(memory_type, tags, limit, offset)
 
+        # Hybrid path: fuse FTS with a dense vector leg via RRF.
+        if getattr(self, "_hybrid", False) and query.strip():
+            return await self._recall_hybrid(query, memory_type, tags, limit, offset)
+
+        scored = await self._fts_scored(query, memory_type, tags, pool=max(limit * 3, 60))
+        return await self._finalize_recall(scored, limit, offset)
+
+    async def _fts_scored(
+        self,
+        query: str,
+        memory_type: str | None,
+        tags: list[str] | None,
+        pool: int = 60,
+    ) -> list[dict]:
+        """Pure-FTS scored candidates: sorted, rank-aware-gated, time-decayed.
+
+        Internal fields ``_rid`` / ``_fts`` / ``_age_days`` are retained for
+        hybrid fusion and stripped by :meth:`_finalize_recall`.
+        """
         from opendb_core.utils.tokenizer import tokenize_for_fts
 
         fts_query = escape_fts5(tokenize_for_fts(query), use_or=True)
@@ -251,14 +277,10 @@ class SQLiteMemoryMixin:
             for tag in tags:
                 conditions.append("m.tags LIKE ?")
                 params.append(f'%"{tag}"%')
-
         filter_clause = (" AND " + " AND ".join(conditions)) if conditions else ""
 
-        # Fetch extra rows for Python-side time-decay + confidence re-ranking
-        fetch_limit = max(limit * 3, 60)
-
         search_sql = f"""
-            SELECT m.memory_id, m.content, m.memory_type, m.pinned,
+            SELECT m.id AS _rid, m.memory_id, m.content, m.memory_type, m.pinned,
                    m.source, m.superseded_id, m.confidence,
                    m.last_accessed, m.access_count,
                    m.tags, m.metadata, m.created_at, m.updated_at,
@@ -271,21 +293,8 @@ class SQLiteMemoryMixin:
             ORDER BY memories_fts.rank
             LIMIT ?
         """
-        count_sql = f"""
-            SELECT COUNT(*)
-            FROM memories_fts
-            JOIN memories m ON memories_fts.rowid = m.id
-            WHERE memories_fts MATCH ?{filter_clause}
-        """
-
-        search_params = [fts_query, *params, fetch_limit]
-        count_params = [fts_query, *params]
-
-        async with self._db.execute(search_sql, search_params) as cur:
+        async with self._db.execute(search_sql, [fts_query, *params, pool]) as cur:
             rows = await cur.fetchall()
-        async with self._db.execute(count_sql, count_params) as cur:
-            total_row = await cur.fetchone()
-        total = total_row[0] if total_row else 0
 
         from opendb_core.config import settings
         halflife = settings.memory_decay_halflife_days
@@ -300,7 +309,6 @@ class SQLiteMemoryMixin:
             meta = json.loads(r["metadata"]) if r["metadata"] else {}
             days_since = float(r["days_since_access"]) if r["days_since_access"] else 0.0
 
-            # Compute live confidence (may have decayed since last access)
             live_conf = compute_confidence(
                 base_confidence=float(r["confidence"]),
                 days_since_last_access=days_since,
@@ -308,8 +316,6 @@ class SQLiteMemoryMixin:
                 pinned=bool(r["pinned"]),
                 stability=stability,
             )
-
-            # Skip faded memories
             if live_conf < threshold:
                 continue
 
@@ -334,14 +340,11 @@ class SQLiteMemoryMixin:
                 "updated_at": r["updated_at"],
                 "_age_days": eff_age,
                 "_fts": fts_score,
+                "_rid": r["_rid"],
             })
 
-        # Rank-aware query gate. The token-overlap gate is a precision filter
-        # for weak tail matches, but it must never discard a strong lexical
-        # hit: different phrasing between a question and the stored answer can
-        # yield <2 overlapping tokens while the answer is still the #1 FTS
-        # match. So keep any result close to the best FTS score and apply the
-        # overlap gate only to the weaker tail.
+        # Rank-aware query gate: never discard a strong lexical hit, gate only
+        # the weak tail.
         if scored:
             best_fts = max(s["_fts"] for s in scored)
             keep_floor = best_fts * 0.15
@@ -350,31 +353,209 @@ class SQLiteMemoryMixin:
                 if s["_fts"] >= keep_floor
                 or passes_memory_query_gate(query, str(s["content"]))
             ]
-        total = len(scored)
 
-        # Recency tiebreaker: when FTS scores cluster, boost newer memories
+        # Recency tiebreaker: when FTS scores cluster, boost newer memories.
         if len(scored) >= 2:
             max_score = max(s["score"] for s in scored)
             if max_score > 0:
                 for s in scored:
                     if s["score"] / max_score > 0.7:
                         age = s["_age_days"]
-                        recency_bonus = 1.0 + 0.3 * (0.5 ** (age / 1.0))
-                        s["score"] = s["score"] * recency_bonus
+                        s["score"] = s["score"] * (1.0 + 0.3 * (0.5 ** (age / 1.0)))
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        # Strip internal field and round final scores before returning
+        return scored
+
+    async def _finalize_recall(
+        self, scored: list[dict], limit: int, offset: int
+    ) -> dict:
+        """Strip internal fields, round scores, slice, and reinforce."""
+        total = len(scored)
         for s in scored:
             s.pop("_age_days", None)
             s.pop("_fts", None)
+            s.pop("_rid", None)
             s["score"] = float(f"{s['score']:.6g}")
         results = scored[offset : offset + limit]
-
-        # Recall reinforcement: bump confidence for returned memories
-        hit_ids = [r["memory_id"] for r in results]
-        await self._reinforce_memories(hit_ids)
-
+        await self._reinforce_memories([r["memory_id"] for r in results])
         return {"total": total, "results": results}
+
+    # ------------------------------------------------------------------
+    # Hybrid recall (FTS + dense vectors, fused with RRF)
+    # ------------------------------------------------------------------
+
+    async def _write_memory_vector(self, rowid: int, content: str) -> None:
+        """(Re)write the dense-vector row and entity index for a memory. Caller
+        orders locking; the connection autocommits (isolation_level=None)."""
+        import sqlite_vec
+        from opendb_core import embedding
+        from opendb_core.entities import extract_entities
+
+        try:
+            vec = embedding.embed_one(content)
+            await self._db.execute("DELETE FROM memories_vec WHERE rowid = ?", (rowid,))
+            await self._db.execute(
+                "INSERT INTO memories_vec(rowid, embedding) VALUES (?, ?)",
+                (rowid, sqlite_vec.serialize_float32(vec)),
+            )
+        except Exception:
+            logger.exception("hybrid: embedding failed for rowid=%s", rowid)
+
+        # Entity index (third signal) — best-effort, never blocks the write.
+        try:
+            await self._db.execute(
+                "DELETE FROM memory_entities WHERE memory_rowid = ?", (rowid,)
+            )
+            ents = extract_entities(content)
+            if ents:
+                await self._db.executemany(
+                    "INSERT INTO memory_entities(memory_rowid, entity) VALUES (?, ?)",
+                    [(rowid, e) for e in ents],
+                )
+        except Exception:
+            logger.exception("hybrid: entity indexing failed for rowid=%s", rowid)
+
+    async def _recall_hybrid(
+        self,
+        query: str,
+        memory_type: str | None,
+        tags: list[str] | None,
+        limit: int,
+        offset: int,
+    ) -> dict:
+        """FTS-first hybrid recall.
+
+        The pure-FTS result and its ranking are preserved **exactly** (so
+        exact-identifier / keyword queries never regress). The dense vector
+        leg only *appends* semantically-related memories that FTS missed
+        entirely — recovering paraphrased queries that share no keywords with
+        the stored answer. This avoids the classic failure mode where naive
+        rank fusion lets vector noise outrank a strong lexical match.
+        """
+        import sqlite_vec
+        from opendb_core import embedding
+        from opendb_core.config import settings
+
+        pool = max(limit * 3, 60)
+        # 1. FTS leg — untouched ordering/scoring.
+        fts_scored = await self._fts_scored(query, memory_type, tags, pool=pool)
+        seen = {s["_rid"] for s in fts_scored}
+
+        # 2. Vector leg — semantic candidates FTS did not already return.
+        vec_order: list[int] = []
+        try:
+            qvec = embedding.embed_one(query)
+            async with self._db.execute(
+                "SELECT rowid AS rid FROM memories_vec "
+                "WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+                (sqlite_vec.serialize_float32(qvec), settings.memory_vector_candidates),
+            ) as cur:
+                for r in await cur.fetchall():
+                    if r["rid"] not in seen:
+                        vec_order.append(r["rid"])
+                        seen.add(r["rid"])
+        except Exception:
+            logger.exception("hybrid: vector search failed; FTS only this query")
+
+        vec_scored = await self._score_vector_only(vec_order, memory_type, tags, query)
+
+        # 3. Entity leg — memories that *name* an entity from the query (links
+        # facts about the same thing across sessions; drives temporal/multi-hop).
+        ent_order: list[int] = []
+        from opendb_core.entities import query_entities
+
+        qents = query_entities(query)
+        if qents:
+            ph = ",".join("?" for _ in qents)
+            try:
+                async with self._db.execute(
+                    f"SELECT memory_rowid AS rid, COUNT(*) AS hits FROM memory_entities "
+                    f"WHERE entity IN ({ph}) GROUP BY memory_rowid "
+                    f"ORDER BY hits DESC LIMIT ?",
+                    [*qents, settings.memory_vector_candidates],
+                ) as cur:
+                    for r in await cur.fetchall():
+                        if r["rid"] not in seen:
+                            ent_order.append(r["rid"])
+                            seen.add(r["rid"])
+            except aiosqlite.DatabaseError:
+                pass
+        ent_scored = await self._score_vector_only(ent_order, memory_type, tags, query)
+
+        # FTS hits first (ranking untouched), then semantic-only, then
+        # entity-only additions.
+        return await self._finalize_recall(
+            fts_scored + vec_scored + ent_scored, limit, offset
+        )
+
+    async def _score_vector_only(
+        self,
+        rowids: list[int],
+        memory_type: str | None,
+        tags: list[str] | None,
+        query: str,
+    ) -> list[dict]:
+        """Build result dicts for vector-only candidates, preserving the input
+        (vector-distance) order and applying the same filters/decay as FTS, but
+        scored strictly below any FTS hit (they are appended, not re-sorted)."""
+        if not rowids:
+            return []
+        from opendb_core.config import settings
+
+        conditions = ["m.id IN (%s)" % ",".join("?" for _ in rowids)]
+        params: list = list(rowids)
+        if memory_type:
+            conditions.append("m.memory_type = ?")
+            params.append(memory_type)
+        if tags:
+            for tag in tags:
+                conditions.append("m.tags LIKE ?")
+                params.append(f'%"{tag}"%')
+        sql = (
+            "SELECT m.id AS _rid, m.memory_id, m.content, m.memory_type, m.pinned, "
+            "m.source, m.superseded_id, m.confidence, m.last_accessed, m.access_count, "
+            "m.tags, m.metadata, m.created_at, m.updated_at, "
+            "julianday('now') - julianday(COALESCE(m.last_accessed, m.created_at)) AS days_since_access "
+            f"FROM memories m WHERE {' AND '.join(conditions)}"
+        )
+        async with self._db.execute(sql, params) as cur:
+            rows = {r["_rid"]: r for r in await cur.fetchall()}
+
+        stability = settings.memory_stability_days
+        threshold = settings.memory_confidence_threshold
+        out = []
+        for pos, rid in enumerate(rowids):  # preserve vector-distance order
+            r = rows.get(rid)
+            if r is None:  # filtered out by type/tag
+                continue
+            days_since = float(r["days_since_access"]) if r["days_since_access"] else 0.0
+            live_conf = compute_confidence(
+                base_confidence=float(r["confidence"]),
+                days_since_last_access=days_since,
+                access_count=int(r["access_count"]),
+                pinned=bool(r["pinned"]),
+                stability=stability,
+            )
+            if live_conf < threshold:
+                continue
+            out.append({
+                "memory_id": r["memory_id"],
+                "content": r["content"],
+                "memory_type": r["memory_type"],
+                "pinned": bool(r["pinned"]),
+                "source": r["source"] if r["source"] else "unknown",
+                "superseded_id": r["superseded_id"],
+                "confidence": round(live_conf, 4),
+                "tags": json.loads(r["tags"]) if r["tags"] else [],
+                "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
+                "highlight": build_highlight(r["content"], query),
+                # cosmetic, strictly-decreasing score below FTS hits; order is
+                # already fixed by list position (vector distance).
+                "score": round(0.01 * (0.99 ** pos), 8),
+                "created_at": r["created_at"],
+                "updated_at": r["updated_at"],
+            })
+        return out
 
     async def _list_pinned(
         self,
@@ -469,6 +650,13 @@ class SQLiteMemoryMixin:
             await self._db.execute(
                 "DELETE FROM memories WHERE id = ?", (rowid,)
             )
+            if getattr(self, "_hybrid", False):
+                await self._db.execute(
+                    "DELETE FROM memories_vec WHERE rowid = ?", (rowid,)
+                )
+                await self._db.execute(
+                    "DELETE FROM memory_entities WHERE memory_rowid = ?", (rowid,)
+                )
             await self._db.commit()
             return True
 
