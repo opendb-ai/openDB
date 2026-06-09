@@ -1,0 +1,705 @@
+{
+  "summary": {
+    "total": 24,
+    "overall": {
+      "R@1": 87.5,
+      "R@3": 100.0,
+      "R@5": 100.0,
+      "R@10": 100.0
+    },
+    "by_type": {
+      "api-signature": {
+        "count": 3,
+        "R@5": 100.0
+      },
+      "bug-fix": {
+        "count": 3,
+        "R@5": 100.0
+      },
+      "code-architecture": {
+        "count": 4,
+        "R@5": 100.0
+      },
+      "code-convention": {
+        "count": 4,
+        "R@5": 100.0
+      },
+      "code-location": {
+        "count": 3,
+        "R@5": 100.0
+      },
+      "knowledge-update": {
+        "count": 4,
+        "R@5": 100.0
+      },
+      "multi-session": {
+        "count": 3,
+        "R@5": 100.0
+      }
+    },
+    "timing": {
+      "recall_median_ms": 1.6,
+      "recall_mean_ms": 1.7,
+      "store_median_ms": 23.0
+    },
+    "misses": 0,
+    "elapsed_seconds": 1.2
+  },
+  "questions": [
+    {
+      "question_id": "arch_billing_db",
+      "question_type": "code-architecture",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 2.54,
+      "store_time_ms": 28.35,
+      "answer_session_ids": [
+        "arch_billing_db_s7"
+      ],
+      "recalled_session_ids": [
+        "arch_billing_db_s7",
+        "arch_billing_db_s6",
+        "arch_billing_db_s14",
+        "arch_billing_db_s16",
+        "arch_billing_db_s11",
+        "arch_billing_db_s8",
+        "arch_billing_db_s4",
+        "arch_billing_db_s5",
+        "arch_billing_db_s17",
+        "arch_billing_db_s9"
+      ]
+    },
+    {
+      "question_id": "arch_event_bus",
+      "question_type": "code-architecture",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 2.21,
+      "store_time_ms": 24.79,
+      "answer_session_ids": [
+        "arch_event_bus_s2"
+      ],
+      "recalled_session_ids": [
+        "arch_event_bus_s2",
+        "arch_event_bus_s15",
+        "arch_event_bus_s8",
+        "arch_event_bus_s16",
+        "arch_event_bus_s13",
+        "arch_event_bus_s10",
+        "arch_event_bus_s7",
+        "arch_event_bus_s4",
+        "arch_event_bus_s3",
+        "arch_event_bus_s14"
+      ]
+    },
+    {
+      "question_id": "arch_auth",
+      "question_type": "code-architecture",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 2.12,
+      "store_time_ms": 22.59,
+      "answer_session_ids": [
+        "arch_auth_s16"
+      ],
+      "recalled_session_ids": [
+        "arch_auth_s16",
+        "arch_auth_s14",
+        "arch_auth_s17",
+        "arch_auth_s13",
+        "arch_auth_s11",
+        "arch_auth_s4",
+        "arch_auth_s8",
+        "arch_auth_s5",
+        "arch_auth_s15",
+        "arch_auth_s1"
+      ]
+    },
+    {
+      "question_id": "arch_routing_cache",
+      "question_type": "code-architecture",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.84,
+      "store_time_ms": 21.51,
+      "answer_session_ids": [
+        "arch_routing_cache_s4"
+      ],
+      "recalled_session_ids": [
+        "arch_routing_cache_s4",
+        "arch_routing_cache_s16",
+        "arch_routing_cache_s11",
+        "arch_routing_cache_s2",
+        "arch_routing_cache_s8",
+        "arch_routing_cache_s15",
+        "arch_routing_cache_s5",
+        "arch_routing_cache_s10",
+        "arch_routing_cache_s17",
+        "arch_routing_cache_s7"
+      ]
+    },
+    {
+      "question_id": "conv_error",
+      "question_type": "code-convention",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.97,
+      "store_time_ms": 23.18,
+      "answer_session_ids": [
+        "conv_error_s4"
+      ],
+      "recalled_session_ids": [
+        "conv_error_s4",
+        "conv_error_s17",
+        "conv_error_s15",
+        "conv_error_s12",
+        "conv_error_s3",
+        "conv_error_s8",
+        "conv_error_s0",
+        "conv_error_s11",
+        "conv_error_s5",
+        "conv_error_s7"
+      ]
+    },
+    {
+      "question_id": "conv_naming",
+      "question_type": "code-convention",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.33,
+      "store_time_ms": 20.66,
+      "answer_session_ids": [
+        "conv_naming_s6"
+      ],
+      "recalled_session_ids": [
+        "conv_naming_s6",
+        "conv_naming_s8",
+        "conv_naming_s16",
+        "conv_naming_s14",
+        "conv_naming_s17",
+        "conv_naming_s1",
+        "conv_naming_s12",
+        "conv_naming_s0",
+        "conv_naming_s15",
+        "conv_naming_s10"
+      ]
+    },
+    {
+      "question_id": "conv_migrations",
+      "question_type": "code-convention",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.88,
+      "store_time_ms": 22.01,
+      "answer_session_ids": [
+        "conv_migrations_s9"
+      ],
+      "recalled_session_ids": [
+        "conv_migrations_s9",
+        "conv_migrations_s4",
+        "conv_migrations_s7",
+        "conv_migrations_s13",
+        "conv_migrations_s10",
+        "conv_migrations_s17",
+        "conv_migrations_s3",
+        "conv_migrations_s0",
+        "conv_migrations_s14",
+        "conv_migrations_s8"
+      ]
+    },
+    {
+      "question_id": "conv_tests",
+      "question_type": "code-convention",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 2.25,
+      "store_time_ms": 25.45,
+      "answer_session_ids": [
+        "conv_tests_s1"
+      ],
+      "recalled_session_ids": [
+        "conv_tests_s1",
+        "conv_tests_s7",
+        "conv_tests_s9",
+        "conv_tests_s5",
+        "conv_tests_s16",
+        "conv_tests_s15",
+        "conv_tests_s10",
+        "conv_tests_s14",
+        "conv_tests_s0",
+        "conv_tests_s6"
+      ]
+    },
+    {
+      "question_id": "api_create_invoice",
+      "question_type": "api-signature",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.28,
+      "store_time_ms": 23.35,
+      "answer_session_ids": [
+        "api_create_invoice_s3"
+      ],
+      "recalled_session_ids": [
+        "api_create_invoice_s3",
+        "api_create_invoice_s1",
+        "api_create_invoice_s0",
+        "api_create_invoice_s9",
+        "api_create_invoice_s4",
+        "api_create_invoice_s8",
+        "api_create_invoice_s16",
+        "api_create_invoice_s17",
+        "api_create_invoice_s10",
+        "api_create_invoice_s15"
+      ]
+    },
+    {
+      "question_id": "api_route_endpoint",
+      "question_type": "api-signature",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.31,
+      "store_time_ms": 21.82,
+      "answer_session_ids": [
+        "api_route_endpoint_s8"
+      ],
+      "recalled_session_ids": [
+        "api_route_endpoint_s8",
+        "api_route_endpoint_s17",
+        "api_route_endpoint_s11",
+        "api_route_endpoint_s9",
+        "api_route_endpoint_s3",
+        "api_route_endpoint_s14",
+        "api_route_endpoint_s6",
+        "api_route_endpoint_s16",
+        "api_route_endpoint_s15",
+        "api_route_endpoint_s5"
+      ]
+    },
+    {
+      "question_id": "api_telemetry",
+      "question_type": "api-signature",
+      "hits": {
+        "1": false,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.34,
+      "store_time_ms": 21.75,
+      "answer_session_ids": [
+        "api_telemetry_s4"
+      ],
+      "recalled_session_ids": [
+        "api_telemetry_s14",
+        "api_telemetry_s4",
+        "api_telemetry_s15",
+        "api_telemetry_s8",
+        "api_telemetry_s13",
+        "api_telemetry_s6",
+        "api_telemetry_s12",
+        "api_telemetry_s11",
+        "api_telemetry_s3",
+        "api_telemetry_s0"
+      ]
+    },
+    {
+      "question_id": "bug_tz",
+      "question_type": "bug-fix",
+      "hits": {
+        "1": false,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.66,
+      "store_time_ms": 24.59,
+      "answer_session_ids": [
+        "bug_tz_s3"
+      ],
+      "recalled_session_ids": [
+        "bug_tz_s14",
+        "bug_tz_s3",
+        "bug_tz_s9",
+        "bug_tz_s12",
+        "bug_tz_s5",
+        "bug_tz_s15",
+        "bug_tz_s8",
+        "bug_tz_s6",
+        "bug_tz_s16",
+        "bug_tz_s10"
+      ]
+    },
+    {
+      "question_id": "bug_nats_redeliver",
+      "question_type": "bug-fix",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.55,
+      "store_time_ms": 23.6,
+      "answer_session_ids": [
+        "bug_nats_redeliver_s7"
+      ],
+      "recalled_session_ids": [
+        "bug_nats_redeliver_s7",
+        "bug_nats_redeliver_s5",
+        "bug_nats_redeliver_s8",
+        "bug_nats_redeliver_s0",
+        "bug_nats_redeliver_s17",
+        "bug_nats_redeliver_s9",
+        "bug_nats_redeliver_s6",
+        "bug_nats_redeliver_s16",
+        "bug_nats_redeliver_s12",
+        "bug_nats_redeliver_s1"
+      ]
+    },
+    {
+      "question_id": "bug_redis_stampede",
+      "question_type": "bug-fix",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 2.03,
+      "store_time_ms": 24.13,
+      "answer_session_ids": [
+        "bug_redis_stampede_s14"
+      ],
+      "recalled_session_ids": [
+        "bug_redis_stampede_s14",
+        "bug_redis_stampede_s15",
+        "bug_redis_stampede_s13",
+        "bug_redis_stampede_s9",
+        "bug_redis_stampede_s7",
+        "bug_redis_stampede_s11",
+        "bug_redis_stampede_s4",
+        "bug_redis_stampede_s1",
+        "bug_redis_stampede_s0",
+        "bug_redis_stampede_s2"
+      ]
+    },
+    {
+      "question_id": "loc_auth_mw",
+      "question_type": "code-location",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.18,
+      "store_time_ms": 20.2,
+      "answer_session_ids": [
+        "loc_auth_mw_s0"
+      ],
+      "recalled_session_ids": [
+        "loc_auth_mw_s0",
+        "loc_auth_mw_s5",
+        "loc_auth_mw_s11",
+        "loc_auth_mw_s9",
+        "loc_auth_mw_s15",
+        "loc_auth_mw_s4",
+        "loc_auth_mw_s13",
+        "loc_auth_mw_s6",
+        "loc_auth_mw_s8",
+        "loc_auth_mw_s7"
+      ]
+    },
+    {
+      "question_id": "loc_migrations",
+      "question_type": "code-location",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.57,
+      "store_time_ms": 23.89,
+      "answer_session_ids": [
+        "loc_migrations_s11"
+      ],
+      "recalled_session_ids": [
+        "loc_migrations_s11",
+        "loc_migrations_s7",
+        "loc_migrations_s10",
+        "loc_migrations_s3",
+        "loc_migrations_s1",
+        "loc_migrations_s8",
+        "loc_migrations_s15",
+        "loc_migrations_s17",
+        "loc_migrations_s14",
+        "loc_migrations_s0"
+      ]
+    },
+    {
+      "question_id": "loc_protos",
+      "question_type": "code-location",
+      "hits": {
+        "1": false,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.34,
+      "store_time_ms": 24.25,
+      "answer_session_ids": [
+        "loc_protos_s1"
+      ],
+      "recalled_session_ids": [
+        "loc_protos_s17",
+        "loc_protos_s1",
+        "loc_protos_s0",
+        "loc_protos_s11",
+        "loc_protos_s10",
+        "loc_protos_s4",
+        "loc_protos_s14",
+        "loc_protos_s2",
+        "loc_protos_s12",
+        "loc_protos_s13"
+      ]
+    },
+    {
+      "question_id": "ku_orders_proto",
+      "question_type": "knowledge-update",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.72,
+      "store_time_ms": 25.92,
+      "answer_session_ids": [
+        "ku_orders_proto_s10",
+        "ku_orders_proto_s0"
+      ],
+      "recalled_session_ids": [
+        "ku_orders_proto_s10",
+        "ku_orders_proto_s17",
+        "ku_orders_proto_s0",
+        "ku_orders_proto_s1",
+        "ku_orders_proto_s11",
+        "ku_orders_proto_s16",
+        "ku_orders_proto_s3",
+        "ku_orders_proto_s5",
+        "ku_orders_proto_s7",
+        "ku_orders_proto_s4"
+      ]
+    },
+    {
+      "question_id": "ku_deploy",
+      "question_type": "knowledge-update",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.33,
+      "store_time_ms": 23.39,
+      "answer_session_ids": [
+        "ku_deploy_s0",
+        "ku_deploy_s6"
+      ],
+      "recalled_session_ids": [
+        "ku_deploy_s6",
+        "ku_deploy_s16",
+        "ku_deploy_s15",
+        "ku_deploy_s0",
+        "ku_deploy_s5",
+        "ku_deploy_s13",
+        "ku_deploy_s4",
+        "ku_deploy_s1",
+        "ku_deploy_s14",
+        "ku_deploy_s8"
+      ]
+    },
+    {
+      "question_id": "ku_logging",
+      "question_type": "knowledge-update",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.87,
+      "store_time_ms": 21.87,
+      "answer_session_ids": [
+        "ku_logging_s4",
+        "ku_logging_s12"
+      ],
+      "recalled_session_ids": [
+        "ku_logging_s12",
+        "ku_logging_s4",
+        "ku_logging_s11",
+        "ku_logging_s9",
+        "ku_logging_s16",
+        "ku_logging_s15",
+        "ku_logging_s14",
+        "ku_logging_s10",
+        "ku_logging_s17",
+        "ku_logging_s6"
+      ]
+    },
+    {
+      "question_id": "ku_default_branch",
+      "question_type": "knowledge-update",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.23,
+      "store_time_ms": 21.79,
+      "answer_session_ids": [
+        "ku_default_branch_s11",
+        "ku_default_branch_s3"
+      ],
+      "recalled_session_ids": [
+        "ku_default_branch_s11",
+        "ku_default_branch_s3",
+        "ku_default_branch_s2",
+        "ku_default_branch_s17",
+        "ku_default_branch_s15",
+        "ku_default_branch_s9",
+        "ku_default_branch_s8",
+        "ku_default_branch_s14",
+        "ku_default_branch_s6",
+        "ku_default_branch_s12"
+      ]
+    },
+    {
+      "question_id": "ms_deploy_pipeline",
+      "question_type": "multi-session",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.88,
+      "store_time_ms": 22.28,
+      "answer_session_ids": [
+        "ms_deploy_pipeline_s17",
+        "ms_deploy_pipeline_s1"
+      ],
+      "recalled_session_ids": [
+        "ms_deploy_pipeline_s17",
+        "ms_deploy_pipeline_s1",
+        "ms_deploy_pipeline_s4",
+        "ms_deploy_pipeline_s16",
+        "ms_deploy_pipeline_s15",
+        "ms_deploy_pipeline_s2",
+        "ms_deploy_pipeline_s6",
+        "ms_deploy_pipeline_s8",
+        "ms_deploy_pipeline_s9",
+        "ms_deploy_pipeline_s10"
+      ]
+    },
+    {
+      "question_id": "ms_invoice_flow",
+      "question_type": "multi-session",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.35,
+      "store_time_ms": 22.81,
+      "answer_session_ids": [
+        "ms_invoice_flow_s12",
+        "ms_invoice_flow_s15"
+      ],
+      "recalled_session_ids": [
+        "ms_invoice_flow_s15",
+        "ms_invoice_flow_s12",
+        "ms_invoice_flow_s17",
+        "ms_invoice_flow_s7",
+        "ms_invoice_flow_s5",
+        "ms_invoice_flow_s3",
+        "ms_invoice_flow_s1",
+        "ms_invoice_flow_s2",
+        "ms_invoice_flow_s11",
+        "ms_invoice_flow_s16"
+      ]
+    },
+    {
+      "question_id": "ms_oncall",
+      "question_type": "multi-session",
+      "hits": {
+        "1": true,
+        "3": true,
+        "5": true,
+        "10": true
+      },
+      "recall_time_ms": 1.15,
+      "store_time_ms": 21.0,
+      "answer_session_ids": [
+        "ms_oncall_s6",
+        "ms_oncall_s15"
+      ],
+      "recalled_session_ids": [
+        "ms_oncall_s15",
+        "ms_oncall_s6",
+        "ms_oncall_s7",
+        "ms_oncall_s1",
+        "ms_oncall_s11",
+        "ms_oncall_s0",
+        "ms_oncall_s3",
+        "ms_oncall_s17",
+        "ms_oncall_s13",
+        "ms_oncall_s16"
+      ]
+    }
+  ]
+}
