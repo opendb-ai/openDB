@@ -396,6 +396,12 @@ async def _store_and_recall(
             )
         store_ms = (time.perf_counter() - t0) * 1000
 
+        # Optional Dreaming consolidation: offline timeline synthesis so the
+        # reader sees digested "CURRENT + history" facts, not raw episodes.
+        if os.environ.get("LONGMEM_CONSOLIDATE") == "1":
+            from opendb_core.consolidate import consolidate_timeline
+            await consolidate_timeline(backend)
+
         # Recall
         t1 = time.perf_counter()
         result = await backend.recall_memories(

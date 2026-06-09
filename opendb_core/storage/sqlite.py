@@ -226,6 +226,17 @@ class SQLiteBackend(SQLiteMemoryMixin):
             "CREATE VIRTUAL TABLE IF NOT EXISTS memories_vec USING vec0("
             f"rowid INTEGER PRIMARY KEY, embedding float[{self._embed_dim}])"
         )
+        # Third signal: entity index for entity-match recall (SOTA multi-signal).
+        await self._db.execute(
+            "CREATE TABLE IF NOT EXISTS memory_entities ("
+            "memory_rowid INTEGER NOT NULL, entity TEXT NOT NULL)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mem_entities_entity ON memory_entities(entity)"
+        )
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mem_entities_rowid ON memory_entities(memory_rowid)"
+        )
         await self._db.commit()
         self._hybrid = True
         logger.info(

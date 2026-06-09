@@ -385,21 +385,35 @@ class SQLiteMemoryMixin:
     # ------------------------------------------------------------------
 
     async def _write_memory_vector(self, rowid: int, content: str) -> None:
-        """(Re)write the dense-vector row for a memory. Caller orders locking;
-        the connection autocommits (isolation_level=None)."""
+        """(Re)write the dense-vector row and entity index for a memory. Caller
+        orders locking; the connection autocommits (isolation_level=None)."""
         import sqlite_vec
         from opendb_core import embedding
+        from opendb_core.entities import extract_entities
 
         try:
             vec = embedding.embed_one(content)
+            await self._db.execute("DELETE FROM memories_vec WHERE rowid = ?", (rowid,))
+            await self._db.execute(
+                "INSERT INTO memories_vec(rowid, embedding) VALUES (?, ?)",
+                (rowid, sqlite_vec.serialize_float32(vec)),
+            )
         except Exception:
             logger.exception("hybrid: embedding failed for rowid=%s", rowid)
-            return
-        await self._db.execute("DELETE FROM memories_vec WHERE rowid = ?", (rowid,))
-        await self._db.execute(
-            "INSERT INTO memories_vec(rowid, embedding) VALUES (?, ?)",
-            (rowid, sqlite_vec.serialize_float32(vec)),
-        )
+
+        # Entity index (third signal) — best-effort, never blocks the write.
+        try:
+            await self._db.execute(
+                "DELETE FROM memory_entities WHERE memory_rowid = ?", (rowid,)
+            )
+            ents = extract_entities(content)
+            if ents:
+                await self._db.executemany(
+                    "INSERT INTO memory_entities(memory_rowid, entity) VALUES (?, ?)",
+                    [(rowid, e) for e in ents],
+                )
+        except Exception:
+            logger.exception("hybrid: entity indexing failed for rowid=%s", rowid)
 
     async def _recall_hybrid(
         self,
@@ -445,8 +459,34 @@ class SQLiteMemoryMixin:
 
         vec_scored = await self._score_vector_only(vec_order, memory_type, tags, query)
 
-        # 3. FTS hits first, semantic-only additions after (in vector order).
-        return await self._finalize_recall(fts_scored + vec_scored, limit, offset)
+        # 3. Entity leg — memories that *name* an entity from the query (links
+        # facts about the same thing across sessions; drives temporal/multi-hop).
+        ent_order: list[int] = []
+        from opendb_core.entities import query_entities
+
+        qents = query_entities(query)
+        if qents:
+            ph = ",".join("?" for _ in qents)
+            try:
+                async with self._db.execute(
+                    f"SELECT memory_rowid AS rid, COUNT(*) AS hits FROM memory_entities "
+                    f"WHERE entity IN ({ph}) GROUP BY memory_rowid "
+                    f"ORDER BY hits DESC LIMIT ?",
+                    [*qents, settings.memory_vector_candidates],
+                ) as cur:
+                    for r in await cur.fetchall():
+                        if r["rid"] not in seen:
+                            ent_order.append(r["rid"])
+                            seen.add(r["rid"])
+            except aiosqlite.DatabaseError:
+                pass
+        ent_scored = await self._score_vector_only(ent_order, memory_type, tags, query)
+
+        # FTS hits first (ranking untouched), then semantic-only, then
+        # entity-only additions.
+        return await self._finalize_recall(
+            fts_scored + vec_scored + ent_scored, limit, offset
+        )
 
     async def _score_vector_only(
         self,
@@ -613,6 +653,9 @@ class SQLiteMemoryMixin:
             if getattr(self, "_hybrid", False):
                 await self._db.execute(
                     "DELETE FROM memories_vec WHERE rowid = ?", (rowid,)
+                )
+                await self._db.execute(
+                    "DELETE FROM memory_entities WHERE memory_rowid = ?", (rowid,)
                 )
             await self._db.commit()
             return True

@@ -1,0 +1,65 @@
+{
+ "config": "hybrid+dreaming",
+ "model": "claude-opus-4.8",
+ "overall": 94.7,
+ "n": 470,
+ "by_type": {
+  "knowledge-update": {
+   "acc": 100.0,
+   "correct": 72,
+   "count": 72,
+   "published": {
+    "OMEGA": 96,
+    "Supermemory": 88.5,
+    "Zep": 83.3
+   }
+  },
+  "multi-session": {
+   "acc": 92.6,
+   "correct": 112,
+   "count": 121,
+   "published": {
+    "OMEGA": 83,
+    "Supermemory": 71.4,
+    "Zep": 57.9
+   }
+  },
+  "single-session-assistant": {
+   "acc": 100.0,
+   "correct": 56,
+   "count": 56,
+   "published": {
+    "Supermemory": 96.4,
+    "Zep": 80.4
+   }
+  },
+  "single-session-preference": {
+   "acc": 80.0,
+   "correct": 24,
+   "count": 30,
+   "published": {
+    "Supermemory": 70.0,
+    "Zep": 56.7
+   }
+  },
+  "single-session-user": {
+   "acc": 95.3,
+   "correct": 61,
+   "count": 64,
+   "published": {
+    "Supermemory": 97.1,
+    "Zep": 92.9
+   }
+  },
+  "temporal-reasoning": {
+   "acc": 94.5,
+   "correct": 120,
+   "count": 127,
+   "published": {
+    "OMEGA": 94,
+    "Supermemory": 76.7,
+    "Zep": 62.4
+   }
+  }
+ }
+}

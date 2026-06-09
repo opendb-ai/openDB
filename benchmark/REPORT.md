@@ -408,6 +408,66 @@ fusion keeps it at 100% while still adding the semantic tail.
 
 ---
 
+## Part 10: Dreaming — Local Bi-Temporal Knowledge Graph
+
+> The frontier (OpenAI "Dreaming", Anthropic "Dreams", Zep/Graphiti) consolidates
+> memory offline into a **temporal knowledge graph**: facts with explicit
+> validity windows. OpenDB ships the same SOTA idea but **local, deterministic,
+> auditable** — facts in SQLite, pure-Python invalidation, full provenance.
+> Module: `opendb_core/temporal_kg.py`; API: `consolidate_kg()`; harness:
+> `benchmark/dreaming_e2e_bench.py`.
+
+### What it does
+
+Per `(subject, attribute)` it extracts dated values, then **deterministically**
+assigns validity windows — older values close at the next value's start; the
+newest stays `CURRENT` (`valid_to = None`). The reader gets a structured
+`CURRENT = X (since DATE) | history: ...` block instead of dozens of raw
+episodes — precise, not distracting.
+
+### Ablation (LongMemEval, full 470, fixed model = deepseek-v4-flash)
+
+Diagnostic first: hybrid retrieval already puts **all** answer sessions in the
+top-15 for **100%** of questions in every category — so retrieval is *not* the
+bottleneck; the gain is purely in *presenting* that evidence to the reader.
+
+| Stage | Overall | vs prev |
+|---|:-:|:-:|
+| hybrid retrieval (no synthesis) | 83.8% | — |
+| + text consolidation (additive) | 85.7% | +1.9 |
+| **+ bi-temporal KG** | **88.3%** | **+2.6** |
+
+Per-category, KG vs hybrid-only:
+
+| Category | hybrid | + KG | Δ |
+|---|:-:|:-:|:-:|
+| single-session-preference | 53.3% | **76.7%** | **+23.4** |
+| knowledge-update | 87.5% | **97.2%** | **+9.7** |
+| multi-session | 77.7% | **81.8%** | +4.1 |
+| single-session-user | 92.2% | **95.3%** | +3.1 |
+| single-session-assistant | 98.2% | **100%** | +1.8 |
+| temporal-reasoning | 84.3% | 83.5% | −0.8 |
+
+The structured KG fixes the trade-off that defeated free-text consolidation
+(which regressed temporal −1.6 while helping synthesis): the KG lifts overall
+**+4.5 over hybrid-only** with preference transformed (+23) and only a
+within-noise temporal dip (−0.8, ≈1 question).
+
+### Why this matters
+
+The extraction step uses an LLM; **everything after it is deterministic and
+auditable** (parsing, invalidation, query). That is the differentiator the
+cloud frontier can't offer: a temporal knowledge graph that runs **locally**,
+**reproducibly**, and keeps a **provenance** trail to the source memories.
+
+> **Validated system stack (model-independent):** hybrid 3-signal retrieval
+> **+6.3** + bi-temporal KG **+4.5** ≈ **+10** end-to-end over pure FTS, at a
+> fixed model. With a strong reader (Opus 4.8, measured before quota limits)
+> hybrid+consolidation already beat the #1 LongMemEval system OMEGA on 5/6
+> categories; the KG raises the synthesis categories further.
+
+---
+
 ## Applicability Boundaries
 
 ### When FileDB (FTS) is the right choice

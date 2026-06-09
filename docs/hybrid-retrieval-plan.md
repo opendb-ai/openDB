@@ -3,6 +3,14 @@
 Status: **shipped** ✅ (SQLite backend). Enable with `pip install "open-db[hybrid]"`
 and `FILEDB_MEMORY_RETRIEVAL_MODE=hybrid`. Default stays pure FTS.
 
+**Phase 3 (shipped):** hybrid recall is now a **three-signal** fuse (FTS + dense
+vectors + **entity** matching, `opendb_core/entities.py`), and an offline
+**bi-temporal knowledge graph** "dreaming" pass landed
+(`opendb_core/temporal_kg.py`, `consolidate_kg()`): local, deterministic
+invalidation, full provenance. Validated stack (fixed model): retrieval +6.3,
+KG +4.5 ≈ +10 E2E. See `benchmark/REPORT.md` Parts 9–10 and
+`benchmark/dreaming_e2e_bench.py`.
+
 Implemented: `opendb_core/embedding.py` (local static embedder, `model2vec`),
 sqlite-vec `memories_vec` table created on init, vectors written on store /
 removed on delete, and **FTS-first** fusion in `_recall_hybrid` (the FTS result
