@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Benchmark methodology — the ranking suite could not select a ranking weight
+
+`benchmark/tune_ranking.py` exists to choose the ranking constants. It could
+not: as shipped in 2.0.0 it returned an identical 80.0% top-1, with identical
+per-category results, for **every** recency weight in [0.25, 1.5]. It scored the
+2.0.1 supersession regression as 100% and let it ship. Library code is
+unchanged; this is the instrument, not the scorer.
+
+- **Every supersession case gave the newer memory a lexical score at least as
+  good as the stale one**, so all three passed at any weight. Real superseded
+  facts usually look the opposite way: the stale row repeats the query's own
+  wording while its replacement describes the change. Two cases with that shape
+  are added — including the exact one `memory_stress_bench.py` caught and this
+  suite missed.
+
+- **`age-spread/car` retrieved nothing at all.** It asked "what car did I buy"
+  against "Bought a Honda Civic." — no token matches ("car" is in neither
+  memory, and "buy" is not "Bought"), so FTS returned an empty set and the case
+  was scored as a ranking failure. It held `age_spread` at 50% for every weight
+  in the grid while measuring nothing. The query now shares vocabulary with both
+  memories, and `evaluate` reports an empty result set as a **broken fixture**
+  rather than a scorer failure, so the next dead case is visible instead of
+  quietly deflating a category forever.
+
+- **Known defects are separated from regressions.** `relevance-wins/port` is a
+  real, characterised defect — the row that literally answers the question loses
+  to a fresh row that does not, because age both suppresses recency *and* decays
+  confidence, so a 2x lexical advantage cannot recover. It fails identically at
+  0.5 and 0.75, predating and surviving the 2.0.1 fix. It is now reported as a
+  known defect with its decomposition instead of being averaged into the
+  headline, so the top-1 number moves when something actually breaks.
+
+- **`--explain`** prints the score decomposition for each failure. Reconstructing
+  it by hand is what made the 2.0.1 bug expensive to find. Where a scorer emits
+  no decomposition (`legacy`), it says so rather than printing zeros.
+
+- **`--sweep`** scores a list of weights and states plainly whether the suite
+  can separate them. Run it before quoting any tuned constant.
+
+Repaired, the suite does its job:
+
+| recency weight | top-1 | regressions |
+|---|:-:|---|
+| 0.25 (what the old cross-validation preferred) | 83.3% | 2 supersession |
+| 0.50 (shipped in 2.0.0) | **75.0%** | **2 supersession** |
+| 0.75 (shipped in 2.0.1) | **91.7%** | none |
+
+Cross-validation now independently selects **0.75** in four of five folds — the
+value 2.0.1 arrived at by measuring entirely different suites. The fifth fold
+holds out supersession itself, picks 0.25 from what remains, and then scores
+60% on the held-out cases, which is the tradeoff stated explicitly.
+
 ## [2.0.1] — 2026-08-04
 
 ### Fixed
