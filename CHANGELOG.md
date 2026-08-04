@@ -5,10 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.0] — 2026-08-04
 
-Architecture review remediation. Several of these change published numbers and
-default behaviour; read the Changed and Removed sections before upgrading.
+Architecture review remediation. **This is a major version because four defaults
+change in ways that break existing deployments** — an upgrade that does not read
+the Changed section will find a Postgres-backed server silently running on
+SQLite and no longer reachable off localhost. Several published benchmark
+numbers are also withdrawn or restated; see Removed and Benchmark methodology.
 
 ### PostgreSQL backend brought to parity
 

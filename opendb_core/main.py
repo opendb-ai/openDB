@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="OpenDB",
     description="cat + grep for any file format",
-    version="1.5.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -119,4 +119,4 @@ app.include_router(workspaces_router)
 
 @app.get("/")
 async def root() -> dict:
-    return {"service": "opendb", "version": "1.5.0"}
+    return {"service": "opendb", "version": "2.0.0"}
