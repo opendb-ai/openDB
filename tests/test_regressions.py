@@ -1112,3 +1112,83 @@ class TestAnchoredMemories:
     async def test_current_commit_returns_none_outside_a_repo(self, tmp_path) -> None:
         from opendb_core.services.anchor_service import current_commit
         assert await current_commit(tmp_path) is None
+
+
+# ======================================================================
+# Benchmark methodology
+# ======================================================================
+
+class TestCodeMemEvalHard:
+    """The four moves that sink CodeMemEval as currently published, each
+    answered with a number rather than an argument."""
+
+    @staticmethod
+    def _mod():
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parent.parent / "benchmark" / "codemem_hard.py"
+        spec = importlib.util.spec_from_file_location("codemem_hard", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_wilson_interval_matches_the_published_claim(self) -> None:
+        """96.3% is 26/27, and its interval is 17.6 points wide."""
+        lo, hi = self._mod().wilson(26, 27)
+        assert 0.81 < lo < 0.83
+        assert 0.99 < hi < 1.0
+        assert (hi - lo) > 0.17
+
+    def test_required_n_grows_as_precision_tightens(self) -> None:
+        m = self._mod()
+        assert m.n_for_precision(0.95, 0.10) < 30
+        assert m.n_for_precision(0.95, 0.02) > 400
+
+    def test_facts_load_without_an_api_key(self) -> None:
+        """gen_codemem imports the OpenAI client at module scope. A methodology
+        check that needs a paid credential is one nobody runs."""
+        facts = self._mod()._load_facts()
+        assert len(facts) > 10
+        assert {"id", "type", "fact", "question", "answer"} <= set(facts[0])
+
+    def test_paraphrases_have_far_lower_overlap_than_originals(self) -> None:
+        """The point of the split: a system that only scores on the high-overlap
+        half has been measured on the wrong thing."""
+        m = self._mod()
+        facts = {f["id"]: f for f in m._load_facts()}
+        orig, para = [], []
+        for fid, q in m.PARAPHRASE_QUESTIONS.items():
+            f = facts[fid]
+            ev = m._tokens(f["fact"])
+            for question, bucket in ((f["question"], orig), (q, para)):
+                qt = m._tokens(question)
+                bucket.append(len(qt & ev) / len(qt) if qt else 0.0)
+        assert sum(orig) / len(orig) > 0.4
+        assert sum(para) / len(para) < 0.15
+
+    def test_every_paraphrase_targets_a_real_fact(self) -> None:
+        m = self._mod()
+        ids = {f["id"] for f in m._load_facts()}
+        assert set(m.PARAPHRASE_QUESTIONS) <= ids
+
+    def test_adversarial_answers_are_wrong_but_plausible(self) -> None:
+        """A judge that accepts these is not measuring correctness."""
+        m = self._mod()
+        facts = {f["id"]: f for f in m._load_facts()}
+        assert len(m.ADVERSARIAL_ANSWERS) >= 10
+        for a in m.ADVERSARIAL_ANSWERS:
+            gold = facts[a["fact_id"]]["answer"]
+            assert a["wrong"] != gold
+            # Plausible means it shares vocabulary with the gold answer; a
+            # nonsense string would not test the judge at all.
+            assert m._tokens(a["wrong"]) & m._tokens(gold)
+            assert a["why"]
+
+    def test_new_categories_need_time_to_answer(self) -> None:
+        """A flat question/answer pair cannot express either category."""
+        m = self._mod()
+        for case in m.TEMPORAL_CASES:
+            assert case["answer_now"] != case["answer_then"]
+        for case in m.STALENESS_CASES:
+            assert case["expect_flagged"] is True
