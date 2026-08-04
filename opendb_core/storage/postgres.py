@@ -13,6 +13,10 @@ from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
 
+# Columns that may appear in an interpolated ORDER BY. Mirrors the SQLite
+# backend's allowlist so the two behave the same.
+_SORTABLE_FIELDS = frozenset({"created_at", "filename", "file_size", "updated_at"})
+
 
 from opendb_core.storage._pg_memory import PgMemoryMixin
 
@@ -28,9 +32,22 @@ class PostgresBackend(PgMemoryMixin):
         self.workspace_id = workspace_id
 
     async def init(self) -> None:
-        """Run lightweight schema migrations (add columns if missing)."""
-        await self._migrate_cjk_columns()
-        await self._migrate_eval_and_links()
+        """Create the schema if absent, then apply outstanding migrations.
+
+        There used to be no bootstrap: `sql/schema.sql` had to be applied by
+        hand, and this method ran `information_schema` probes whose failure was
+        indistinguishable from success. Everything now goes through the
+        versioned runner, which records what it applied in `schema_version`.
+        """
+        from opendb_core.database import get_pool
+        from opendb_core.storage._pg_migrations import run_migrations, TARGET_VERSION
+
+        pool = await get_pool()
+        version = await run_migrations(pool)
+        if version != TARGET_VERSION:
+            raise RuntimeError(
+                f"PostgreSQL schema is at version {version}, expected {TARGET_VERSION}"
+            )
         await self._backfill_code_symbols_if_needed()
 
     async def close(self) -> None:
@@ -742,6 +759,17 @@ class PostgresBackend(PgMemoryMixin):
         offset: int,
     ) -> dict:
         from opendb_core.database import get_pool
+
+        # ORDER BY cannot be parameterized, so these two are interpolated into
+        # the SQL text. They must therefore come from a fixed allowlist and
+        # never from the caller's string — previously any value reached the
+        # query verbatim.
+        if sort_field not in _SORTABLE_FIELDS:
+            raise ValueError(
+                f"sort_field must be one of {sorted(_SORTABLE_FIELDS)}, got {sort_field!r}"
+            )
+        sort_dir = "DESC" if str(sort_dir).upper() == "DESC" else "ASC"
+
         pool = await get_pool()
         async with pool.acquire() as conn:
             conditions = ["f.status = 'ready'"]

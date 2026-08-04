@@ -31,6 +31,20 @@ async def grep_files(
 
 _MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB — skip files larger than this
 
+# Longest subject string handed to the regex engine, per line.
+_MAX_LINE_CHARS = 20_000
+
+# A quantified group that is itself quantified — (a+)+, (a*)*, (a|b)+* — is the
+# classic exponential-backtracking shape. Python's `re` has no step limit and
+# no timeout, so a single crafted pattern from an agent (the pattern is
+# caller-supplied) could pin a CPU indefinitely.
+_NESTED_QUANTIFIER_RE = re.compile(r"\([^)]*[+*][^)]*\)\s*[+*{]")
+
+
+def _has_catastrophic_backtracking(pattern: str) -> bool:
+    """Cheap structural check for the exponential-backtracking shape."""
+    return bool(_NESTED_QUANTIFIER_RE.search(pattern))
+
 
 def _grep_files_sync(
     query: str,
@@ -49,6 +63,16 @@ def _grep_files_sync(
         return {"total": 0, "results": [], "error": f"Directory not found: {path}"}
 
     flags = re.IGNORECASE if case_insensitive else 0
+    if _has_catastrophic_backtracking(query):
+        return {
+            "total": 0,
+            "results": [],
+            "error": (
+                "Rejected regex: nested quantifiers such as (a+)+ or (a*)* can "
+                "take exponential time on non-matching input. Rewrite the "
+                "pattern without a quantified group inside a quantifier."
+            ),
+        }
     try:
         pattern = re.compile(query, flags)
     except re.error as e:
@@ -83,12 +107,18 @@ def _grep_files_sync(
 
         lines = text.split("\n")
         for i, line in enumerate(lines):
-            # Check per-file timeout every 5000 lines
-            if i % 5000 == 0 and time.monotonic() > deadline:
+            # Check the deadline every line. It used to be checked once every
+            # 5000 lines, which is useless against catastrophic backtracking:
+            # the blow-up happens *inside* a single search() call, so the
+            # process could sit in line 3 of 4 for minutes without ever
+            # reaching the next check.
+            if time.monotonic() > deadline:
                 timed_out_files.append(rel)
                 break
 
-            if not pattern.search(line):
+            # A pathological pattern needs a long subject to blow up. Bounding
+            # what reaches the engine bounds the worst case per line.
+            if not pattern.search(line[:_MAX_LINE_CHARS]):
                 continue
 
             total += 1

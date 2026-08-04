@@ -13,6 +13,15 @@ import re
 from pathlib import Path
 
 
+def extract_treesitter_symbols(content, *, filename, source_path=None):
+    """Tree-sitter symbols, or None when the optional tier is not installed."""
+    try:
+        from opendb_core.utils.treesitter_intel import extract_symbols
+    except ImportError:
+        return None
+    return extract_symbols(content, filename=filename, source_path=source_path)
+
+
 _PY_EXTENSIONS = {".py"}
 _JS_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}
 _CODE_EXTENSIONS = _PY_EXTENSIONS | _JS_EXTENSIONS
@@ -34,7 +43,16 @@ _JS_IMPORT_RE = re.compile(
 
 def is_code_path(filename: str, source_path: str | None = None) -> bool:
     suffix = Path(source_path or filename).suffix.lower()
-    return suffix in _CODE_EXTENSIONS
+    if suffix in _CODE_EXTENSIONS:
+        return True
+    # Any language tree-sitter can parse counts as code once that tier is
+    # installed, otherwise Go and Rust files would still be skipped before the
+    # extractor was ever consulted.
+    try:
+        from opendb_core.utils.treesitter_intel import LANGUAGE_BY_SUFFIX, is_available
+    except ImportError:
+        return False
+    return is_available() and suffix in LANGUAGE_BY_SUFFIX
 
 
 def extract_code_intel(
@@ -51,11 +69,27 @@ def extract_code_intel(
     """
     path = (source_path or filename).replace("\\", "/")
     suffix = Path(path).suffix.lower()
+
+    # Links stay regex/AST-based: they are import statements, which are
+    # line-shaped and cheap to match, and the resolver already understands the
+    # project's path conventions.
     if suffix == ".py":
-        return _extract_python(content, path)
-    if suffix in _JS_EXTENSIONS:
-        return _extract_js_like(content, path)
-    return [], []
+        symbols, links = _extract_python(content, path)
+    elif suffix in _JS_EXTENSIONS:
+        symbols, links = _extract_js_like(content, path)
+    else:
+        symbols, links = [], []
+
+    # Symbols prefer tree-sitter when it is installed. Regex extraction saw only
+    # top-level declarations in the JS family and produced nothing at all for
+    # Go, Rust, Java, C#, Ruby, PHP and C/C++ — most of the languages a coding
+    # agent works in. Real spans are also what makes staleness detection
+    # possible: revalidating an anchored memory needs an exact span, not a
+    # regex's guess at where a definition ends.
+    parsed = extract_treesitter_symbols(content, filename=filename, source_path=source_path)
+    if parsed is not None:
+        symbols = parsed
+    return symbols, links
 
 
 def extract_code_intel_from_pages(

@@ -68,6 +68,44 @@ def init(
 
 
 # ---------------------------------------------------------------------------
+# doctor
+# ---------------------------------------------------------------------------
+
+@app.command()
+def doctor(
+    workspace: Path = typer.Argument(Path("."), help="Workspace root directory"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """Check a workspace's invariants and report anything that has drifted.
+
+    Verifies schema version, durability pragmas, FTS/base-table agreement,
+    orphaned rows, stuck ingestions, tokenizer skew and recall latency. Exits
+    non-zero when a check fails, so it can gate a deploy.
+    """
+    import json as _json
+    from opendb_core.services.doctor_service import format_report, run_diagnostics
+    from opendb_core.workspace import Workspace
+
+    ws = Workspace.open(workspace)
+
+    async def _check():
+        await ws.init()
+        try:
+            from opendb_core.storage import get_backend
+            return await run_diagnostics(get_backend())
+        finally:
+            await ws.close()
+
+    report = _run(_check())
+    if json_output:
+        typer.echo(_json.dumps(report.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        typer.echo(format_report(report))
+    if report.worst == "fail":
+        raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
 # index
 # ---------------------------------------------------------------------------
 

@@ -193,6 +193,11 @@ class TestCodeContext:
                 """,
                 ("old-runner", "README.md"),
             )
+            # Make the file look like it was written by a release that predates
+            # schema versioning. The symbol backfill is migration 3 now rather
+            # than something re-run on every init(), so the upgrade path is
+            # what this test needs to exercise.
+            await backend._db.execute("PRAGMA user_version=0")
             await backend._db.commit()
         finally:
             await backend.close()

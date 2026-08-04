@@ -154,17 +154,150 @@ async def run_single_question(
     )
 
 
+async def run_pooled_benchmark(
+    data: list[dict],
+    ks: list[int],
+    limit: int | None = None,
+) -> list[QuestionResult]:
+    """Measure retrieval against ONE corpus built from every question's sessions.
+
+    This is the mode that actually measures retrieval, and it should be the
+    default one to quote.
+
+    The isolated-DB mode below gives each question its own empty database
+    containing only that question's haystack. In ``longmemeval_oracle.json``
+    every haystack *is* the gold set — all 500 questions have
+    ``set(haystack_session_ids) == set(answer_session_ids)``, mean 1.896
+    sessions — so the retriever picks from ~2 candidates to fill 5 slots and
+    R@5 is guaranteed by arithmetic for 497/500 questions. It cannot fail, and
+    a measurement that cannot fail carries no information.
+
+    Pooling every question's sessions into one store turns the other 499
+    questions' sessions into distractors, which is the task a real deployment
+    performs. Expect a materially lower number here; that is the point.
+    """
+    import uuid
+
+    questions = [q for q in data if not q["question_id"].endswith("_abs")]
+    if limit:
+        questions = questions[:limit]
+
+    max_k = max(ks)
+    tmp_root = Path(tempfile.mkdtemp(prefix="opendb_longmemeval_pooled_"))
+    db_path = tmp_root / "pooled.db"
+    results: list[QuestionResult] = []
+
+    try:
+        await init_backend("sqlite", db_path=str(db_path))
+        try:
+            # --- Build one corpus from every question's sessions ---
+            stored: set[str] = set()
+            t0 = time.perf_counter()
+            for q in questions:
+                dates = q.get("haystack_dates", [])
+                for i, (sid, session) in enumerate(
+                    zip(q["haystack_session_ids"], q["haystack_sessions"])
+                ):
+                    if sid in stored:
+                        continue  # sessions are shared between questions
+                    stored.add(sid)
+                    meta = {"session_id": sid}
+                    if i < len(dates):
+                        meta["date"] = dates[i]
+                    await backend_store(sid, flatten_session(session), meta)
+            store_ms = (time.perf_counter() - t0) * 1000
+            print(
+                f"Pooled corpus: {len(stored)} sessions from {len(questions)} questions "
+                f"({store_ms / 1000:.1f}s to index)"
+            )
+            print(
+                f"Distractors per question: "
+                f"{len(stored) - (sum(len(q['haystack_session_ids']) for q in questions) / len(questions)):.0f} "
+                f"on average"
+            )
+            print()
+
+            backend = get_backend()
+            for idx, q in enumerate(questions):
+                answer_ids = set(q["answer_session_ids"])
+                t1 = time.perf_counter()
+                result = await backend.recall_memories(
+                    query=q["question"], memory_type=None, tags=None,
+                    limit=max_k, offset=0,
+                )
+                recall_ms = (time.perf_counter() - t1) * 1000
+
+                recalled_sids = []
+                for mem in result.get("results", []):
+                    sid = (mem.get("metadata") or {}).get("session_id")
+                    if sid:
+                        recalled_sids.append(sid)
+
+                results.append(QuestionResult(
+                    question_id=q["question_id"],
+                    question_type=q["question_type"],
+                    answer_session_ids=list(answer_ids),
+                    recalled_session_ids=recalled_sids[:max_k],
+                    hits={k: bool(set(recalled_sids[:k]) & answer_ids) for k in ks},
+                    recall_time_ms=recall_ms,
+                    store_time_ms=0.0,
+                ))
+
+                if (idx + 1) % 50 == 0 or idx == len(questions) - 1:
+                    r5 = sum(1 for r in results if r.hits.get(5, False)) / len(results) * 100
+                    print(f"  [{idx + 1}/{len(questions)}] Running R@5: {r5:.1f}%")
+        finally:
+            await close_backend(str(db_path))
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+    return results
+
+
+async def backend_store(sid: str, text: str, meta: dict) -> None:
+    import uuid
+    await get_backend().store_memory(
+        memory_id=str(uuid.uuid4()),
+        content=text,
+        memory_type="episodic",
+        tags=[sid],
+        metadata=meta,
+    )
+
+
 async def run_benchmark(
     data: list[dict],
     ks: list[int],
     limit: int | None = None,
 ) -> list[QuestionResult]:
-    """Run the full benchmark: one isolated DB per question."""
+    """Run the isolated-DB benchmark: one empty database per question.
+
+    WARNING: on ``longmemeval_oracle.json`` this does not measure retrieval.
+    Each question's haystack contains only its own gold sessions (mean 1.896,
+    zero distractors), so R@5 is arithmetically guaranteed. Use
+    ``--pooled`` for a number that can distinguish a good retriever from a bad
+    one; this mode is kept for latency measurement and for datasets that carry
+    real distractors (CodeMemEval does: ~17 per question).
+    """
 
     # Skip abstention questions (no ground-truth answer location)
     questions = [q for q in data if not q["question_id"].endswith("_abs")]
     if limit:
         questions = questions[:limit]
+
+    n_distractors = sum(
+        len(set(q["haystack_session_ids"]) - set(q["answer_session_ids"]))
+        for q in questions
+    )
+    if n_distractors == 0 and questions:
+        print("!" * 72)
+        print("! WARNING: this dataset has ZERO distractor sessions.")
+        print("! Every haystack session is a gold session, so Recall@K is")
+        print("! guaranteed whenever the haystack is smaller than K.")
+        print("! The resulting number measures the harness, not the retriever.")
+        print("! Re-run with --pooled for a discriminative measurement.")
+        print("!" * 72)
+        print()
 
     print(f"Running {len(questions)} questions (skipped {len(data) - len(questions)} abstention)")
     print(f"Recall@K levels: {ks}")
@@ -318,13 +451,24 @@ def main() -> None:
         "--output", default=None,
         help="Path to save JSON results (default: longmemeval_results.json)",
     )
+    parser.add_argument(
+        "--pooled", action="store_true",
+        help=(
+            "Measure retrieval against ONE corpus built from every question's "
+            "sessions, so the other questions' sessions act as distractors. "
+            "This is the mode that actually measures retrieval — the default "
+            "per-question mode gives each question an empty database holding "
+            "only its own gold sessions."
+        ),
+    )
     args = parser.parse_args()
 
     ks = sorted(int(k) for k in args.ks.split(","))
     data = load_dataset(args.data)
 
     t_start = time.time()
-    results = asyncio.run(run_benchmark(data, ks, limit=args.limit))
+    runner = run_pooled_benchmark if args.pooled else run_benchmark
+    results = asyncio.run(runner(data, ks, limit=args.limit))
     elapsed = time.time() - t_start
 
     summary = print_report(results, ks)

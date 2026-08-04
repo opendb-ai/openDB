@@ -19,7 +19,19 @@ async def init_pool() -> None:
                 dsn=settings.database_url,
                 min_size=settings.db_pool_min,
                 max_size=settings.db_pool_max,
-                command_timeout=60,
+                command_timeout=settings.db_command_timeout,
+                # Bound how long a caller waits for a free connection. Without
+                # it, pool exhaustion presents as an unbounded hang rather than
+                # an error the caller can act on.
+                timeout=settings.db_acquire_timeout,
+                # Server-side backstop. command_timeout only cancels client
+                # side; statement_timeout makes PostgreSQL itself abort a
+                # runaway query so it stops burning CPU and holding locks.
+                server_settings={
+                    "statement_timeout": str(int(settings.db_statement_timeout_ms)),
+                    "idle_in_transaction_session_timeout": "60000",
+                    "application_name": "opendb",
+                },
             )
             return
         except (OSError, asyncpg.PostgresError) as e:

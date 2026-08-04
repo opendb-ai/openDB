@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from opendb_core.config import settings
+from opendb_core.middleware.auth import ApiKeyMiddleware
+from opendb_core.middleware.limits import BodySizeLimitMiddleware, RateLimitMiddleware
 from opendb_core.services.watch_service import stop_all as stop_all_watchers
 from opendb_core.routers.files import router as files_router
 from opendb_core.routers.context import router as context_router
@@ -57,9 +59,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="OpenDB",
     description="cat + grep for any file format",
-    version="1.5.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
+
+# Order matters: add_middleware() prepends, so the last one added is outermost.
+# ApiKeyMiddleware goes on first and CORS second, which means a rejected request
+# still comes back with CORS headers instead of surfacing as an opaque browser
+# error.
+#
+# This registration is the whole point of FILEDB_AUTH_API_KEY. The middleware
+# existed, was documented and was unit-tested, but was never mounted on the
+# app — so setting the env var did nothing and every endpoint, including
+# POST /index, was reachable unauthenticated.
+app.add_middleware(ApiKeyMiddleware, api_key=settings.auth_api_key)
+
+# Outside auth: a body that is too large, or a caller that is flooding, should
+# be rejected before any credential comparison or handler allocation.
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes)
+app.add_middleware(RateLimitMiddleware, per_minute=settings.rate_limit_per_minute)
 
 app.add_middleware(
     CORSMiddleware,
@@ -101,4 +119,4 @@ app.include_router(workspaces_router)
 
 @app.get("/")
 async def root() -> dict:
-    return {"service": "opendb", "version": "1.5.0"}
+    return {"service": "opendb", "version": "2.0.0"}

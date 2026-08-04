@@ -65,9 +65,16 @@ _queues: dict[str, asyncio.Queue] = {}
 # Minimum seconds between re-ingesting the same file path
 _DEBOUNCE_SECONDS = 2.0
 
+# A file must hold the same (size, mtime) for this long before it is read.
+_QUIESCE_SECONDS = 0.4
+# Give up waiting for a file that keeps changing (an actively appended log).
+_QUIESCE_TIMEOUT = 30.0
+# Bound on the debounce bookkeeping so a long-lived watcher cannot leak.
+_MAX_TRACKED_PATHS = 10_000
+
 
 class _IngestHandler(FileSystemEventHandler):
-    """Watchdog handler that puts file paths onto an asyncio queue."""
+    """Watchdog handler that puts (action, path, dest) onto an asyncio queue."""
 
     def __init__(self, watch_id: str, queue: asyncio.Queue, loop: asyncio.AbstractEventLoop) -> None:
         super().__init__()
@@ -78,14 +85,47 @@ class _IngestHandler(FileSystemEventHandler):
         self._lock = Lock()
 
     def _should_process(self, path_str: str) -> bool:
-        """Debounce: skip if the same path was seen within _DEBOUNCE_SECONDS."""
+        """Rate-limit repeat events for one path.
+
+        This is only a rate limit, not a correctness mechanism. It used to be
+        the sole protection against reading a file mid-write: the *first* event
+        was processed immediately and everything for the next two seconds was
+        dropped, so a large file was ingested while still being written and the
+        later events that would have corrected it were discarded. The consumer
+        now waits for the file to quiesce before reading it.
+        """
         now = time.time()
         with self._lock:
             last = self._last_seen.get(path_str, 0.0)
             if now - last < _DEBOUNCE_SECONDS:
                 return False
+            if len(self._last_seen) >= _MAX_TRACKED_PATHS:
+                cutoff = now - _DEBOUNCE_SECONDS
+                self._last_seen = {
+                    k: v for k, v in self._last_seen.items() if v >= cutoff
+                }
             self._last_seen[path_str] = now
             return True
+
+    def _emit(self, action: str, path: Path, dest: Path | None = None) -> None:
+        self.loop.call_soon_threadsafe(self.queue.put_nowait, (action, path, dest))
+
+    def on_deleted(self, event: FileSystemEvent) -> None:
+        """Remove a deleted file from the index.
+
+        Nothing handled deletions before, so the index never converged with the
+        filesystem: a removed file stayed searchable and readable forever.
+        """
+        if event.is_directory:
+            return
+        self._emit("delete", Path(event.src_path))
+
+    def on_moved(self, event: FileSystemEvent) -> None:
+        """Treat a rename as delete-then-index, so it does not duplicate."""
+        if event.is_directory:
+            return
+        dest = getattr(event, "dest_path", None)
+        self._emit("move", Path(event.src_path), Path(dest) if dest else None)
 
     def _enqueue(self, event: FileSystemEvent) -> None:
         src = event.src_path
@@ -114,7 +154,7 @@ class _IngestHandler(FileSystemEventHandler):
             return
 
         # Thread-safe put onto the asyncio queue
-        self.loop.call_soon_threadsafe(self.queue.put_nowait, path)
+        self._emit("upsert", path)
 
     def on_created(self, event: FileSystemEvent) -> None:
         self._enqueue(event)
@@ -127,15 +167,69 @@ class _IngestHandler(FileSystemEventHandler):
 # Background consumer: pulls paths from queue and ingests them
 # ---------------------------------------------------------------------------
 
+async def _wait_until_quiescent(path: Path) -> bool:
+    """Block until *path* stops changing. False if it never settles or vanishes.
+
+    Editors, downloads and build steps produce a create event long before the
+    bytes are all there. Reading on the first event indexed truncated content,
+    and because the debounce then swallowed the follow-up events, the truncated
+    version was what the agent got — permanently.
+    """
+    deadline = time.monotonic() + _QUIESCE_TIMEOUT
+    last: tuple[int, float] | None = None
+    while time.monotonic() < deadline:
+        try:
+            st = path.stat()
+        except OSError:
+            return False
+        current = (st.st_size, st.st_mtime)
+        if current == last:
+            return True
+        last = current
+        await asyncio.sleep(_QUIESCE_SECONDS)
+    logger.warning("watch: %s kept changing for %.0fs; skipping", path, _QUIESCE_TIMEOUT)
+    return False
+
+
+async def _remove_from_index(path: Path) -> None:
+    """Drop the indexed record for *path*, if there is one."""
+    from opendb_core.storage import get_backend
+
+    backend = get_backend()
+    source = str(path.resolve()).replace("\\", "/")
+    try:
+        file_id = await backend.find_by_source_path(source)
+        if file_id:
+            await backend.delete_file(file_id)
+            logger.info("watch: removed %s from the index", source)
+    except Exception:  # noqa: BLE001 - a watcher must survive a bad event
+        logger.exception("watch: failed to remove %s from the index", source)
+
+
 async def _consume_queue(watch_id: str, queue: asyncio.Queue) -> None:
-    """Long-running task that ingests files as they appear on the queue."""
+    """Long-running task that applies filesystem events to the index."""
     import magic as _magic
     from opendb_core.services.ingest_service import ingest_local_file
 
     while True:
-        path: Path = await queue.get()
+        action, path, dest = await queue.get()
         try:
+            if action == "delete":
+                await _remove_from_index(path)
+                continue
+            if action == "move":
+                # The old path is gone regardless; index the new one if it is
+                # still inside this watch.
+                await _remove_from_index(path)
+                if dest is None:
+                    continue
+                path = dest
+
             if not path.exists() or not path.is_file():
+                continue
+
+            # Only read once the writer has finished.
+            if not await _wait_until_quiescent(path):
                 continue
 
             # Check MIME / parser support
