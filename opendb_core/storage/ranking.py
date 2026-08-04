@@ -23,24 +23,33 @@ first so the weights mean what they look like they mean::
 
     score = w_lex * lexical + w_rec * recency + w_conf * confidence
 
-Which mapping each signal gets depends on whether its magnitude carries
-information:
+Both lexical and recency are normalised against the **candidate set**, not
+against an absolute scale, because neither BM25 nor "days old" means anything
+on its own — only relative to the other rows competing for the same slot:
 
-* **Lexical -> rank space.** A BM25 value is uncalibrated: 8.2 means nothing on
-  its own and is not comparable across queries. Only the ordering is
-  trustworthy, so the score is Reciprocal Rank Fusion normalised to 1.0 at
-  rank 1: ``(k+1)/(k+rank)``. `k` controls how sharply the head is favoured.
+* **Lexical -> ratio to the best hit**, ``fts / best_fts``. Rank space is the
+  fallback used only when no candidate has a positive score. Rank alone reports
+  a 50x BM25 gap and a 1.01x gap as the same one position, so it can express
+  "this is much the better answer" only by accident; the ratio keeps that
+  distinction, which is what separates "a stale but far better match should
+  win" from "these two match equally, let recency decide".
 
-* **Recency -> calibrated magnitude.** Days *are* a real unit, and pure rank
-  space would throw that away: it cannot tell "400 days versus 3" from "4 days
-  versus 3", which is exactly the distinction that decides whether a superseded
-  fact outranks the one that replaced it. The mapping is hyperbolic,
-  ``1/(1 + age/tau)`` — bounded, monotone, and without the exponential's habit
-  of collapsing to zero and taking the ordering with it. At the default
-  tau of 30 days: 3 days -> 0.91, 90 days -> 0.25, 400 days -> 0.07.
+* **Recency -> min-max over the candidate set, blended toward an absolute
+  mapping when the set spans little time.** Min-max alone would score the newest
+  row 1.0 even if it were an hour fresher than the rest; the absolute mapping
+  ``1/(1 + age/tau)`` alone saturates, so at 915 and 1160 days it returns ~0.03
+  for both and a real 26% difference stops mattering. The blend is weighted by
+  ``age_span/(age_span + tau)``: a one-day spread is decided almost entirely by
+  the absolute term, a one-year spread almost entirely by min-max.
 
 * **Confidence -> used directly**, since `compute_confidence` already returns a
   retrievability in [0, 1].
+
+Because both signals span [0, 1] over the same candidate set, the weights are
+directly comparable, and their *ratio* is the real design decision: it says how
+much better a match has to be before it outranks a fresher one. See
+`rank_weight_recency` in `opendb_core/config.py` for how the shipped ratio was
+chosen and what moves when it changes.
 
 Pinning stays a hard tier rather than a multiplier: a pinned memory outranks an
 unpinned one, and pinned memories are ordered among themselves by the same sum.
@@ -65,7 +74,12 @@ class RankingWeights:
     """Pull of each signal. Every signal is in [0, 1], so these are comparable."""
 
     lexical: float = 1.0
-    recency: float = 0.5
+    # Must track `rank_weight_recency` in opendb_core/config.py. These are two
+    # independent defaults: `from_settings` reads the config value, but a bare
+    # `RankingWeights()` uses this one, so letting them drift means tests and
+    # any caller that skips settings silently score against a different scorer
+    # than production does. `tests/test_ranking.py` asserts they agree.
+    recency: float = 0.75
     confidence: float = 0.3
     k: float = DEFAULT_K
     # Age at which the recency term is halved. Interpretable in days, unlike
@@ -151,9 +165,6 @@ def fuse(
 
     k = weights.k
     tau = weights.tau_days / 2.0 if recency_intent else weights.tau_days
-
-    # Ceiling on the unpinned sum, so the pinned tier cannot be out-competed.
-    tier = weights.lexical + weights.recency + weights.confidence
 
     # Ceiling on the unpinned sum, so the pinned tier cannot be out-competed.
     tier = weights.lexical + weights.recency + weights.confidence

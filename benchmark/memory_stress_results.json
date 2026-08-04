@@ -3,7 +3,7 @@
     "passed": 23,
     "total": 23,
     "accuracy": 100.0,
-    "elapsed_seconds": 6.8
+    "elapsed_seconds": 6.5
   },
   "suites": {
     "update": {
@@ -16,13 +16,13 @@
           "name": "simple_fact_update",
           "passed": true,
           "detail": "Top result contains 'green': My favorite color is green. I changed it from blue.",
-          "latency_ms": 36.97
+          "latency_ms": 37.42
         },
         {
           "name": "address_change",
           "passed": true,
           "detail": "Top result contains 'Seattle': I no longer live in San Francisco. I moved to 456 Pine Avenue, Seattle last month.",
-          "latency_ms": 0.38
+          "latency_ms": 0.37
         },
         {
           "name": "job_change",
@@ -34,13 +34,13 @@
           "name": "preference_update",
           "passed": true,
           "detail": "Top result contains 'Rust': I've switched to Rust for backend development. Much faster than Python.",
-          "latency_ms": 0.39
+          "latency_ms": 0.35
         },
         {
           "name": "numeric_update",
           "passed": true,
           "detail": "Top result contains '23': Our team grew to 23 members after the new hires.",
-          "latency_ms": 0.44
+          "latency_ms": 0.34
         }
       ]
     },
@@ -54,31 +54,31 @@
           "name": "never_mentioned_topic",
           "passed": true,
           "detail": "Correctly returned no results",
-          "latency_ms": 0.25
+          "latency_ms": 0.26
         },
         {
           "name": "unrelated_domain",
           "passed": true,
           "detail": "Correctly returned no results",
-          "latency_ms": 0.26
+          "latency_ms": 0.25
         },
         {
           "name": "specific_nonexistent_entity",
           "passed": true,
           "detail": "Correctly returned no results",
-          "latency_ms": 0.24
+          "latency_ms": 0.25
         },
         {
           "name": "empty_memory_store",
           "passed": true,
           "detail": "Correctly returned no results",
-          "latency_ms": 0.22
+          "latency_ms": 0.33
         },
         {
           "name": "partial_overlap_different_context",
           "passed": true,
-          "detail": "Returned 2 results but no keyword overlap (FTS noise, score=0.0000)",
-          "latency_ms": 0.42
+          "detail": "Returned 2 results but no keyword overlap (FTS noise, score=2.0500)",
+          "latency_ms": 0.3
         }
       ]
     },
@@ -92,25 +92,25 @@
           "name": "chronological_events",
           "passed": true,
           "detail": "Top result contains 'memory benchmark': Led my first project — the memory benchmark initiative.",
-          "latency_ms": 1.89
+          "latency_ms": 1.62
         },
         {
           "name": "most_recent_event",
           "passed": true,
           "detail": "Top result contains 'Tesla': Bought a Tesla Model Y from the dealership.",
-          "latency_ms": 0.54
+          "latency_ms": 0.44
         },
         {
           "name": "date_specific_query",
           "passed": true,
           "detail": "Top result contains 'blood pressure': Had a doctor checkup. Blood pressure was normal.",
-          "latency_ms": 0.55
+          "latency_ms": 0.51
         },
         {
           "name": "conflicting_dates",
           "passed": true,
           "detail": "Top result contains 'Svelte': We migrated the frontend from React to Svelte.",
-          "latency_ms": 0.57
+          "latency_ms": 0.51
         }
       ]
     },
@@ -124,31 +124,31 @@
           "name": "chinese_simple_recall",
           "passed": true,
           "detail": "Top result contains 'Python': 我最喜欢的编程语言是Python，因为它简洁易读。",
-          "latency_ms": 0.49
+          "latency_ms": 0.35
         },
         {
           "name": "chinese_search_precision",
           "passed": true,
           "detail": "Top result contains '腾讯云': 公司决定将服务器从阿里云迁移到腾讯云。",
-          "latency_ms": 0.39
+          "latency_ms": 0.3
         },
         {
           "name": "chinese_mixed_content",
           "passed": true,
           "detail": "Top result contains 'PostgreSQL': 数据库选用 PostgreSQL 14，缓存用 Redis 7.0。",
-          "latency_ms": 0.42
+          "latency_ms": 0.34
         },
         {
           "name": "japanese_recall",
           "passed": true,
           "detail": "Top result contains '東京': 東京で行われたカンファレンスに参加しました。とても勉強になりました。",
-          "latency_ms": 0.46
+          "latency_ms": 0.31
         },
         {
           "name": "chinese_long_memory",
           "passed": true,
           "detail": "Top result contains '1500万': 2024年第一季度销售报告：总收入达到1500万元人民币，同比增长25%。其中线上渠道贡献了60%的收入，线下渠道贡献40%。华东地区是最大的市场，占总收入的3",
-          "latency_ms": 0.47
+          "latency_ms": 0.32
         }
       ]
     },
@@ -161,26 +161,26 @@
         {
           "name": "scale_100",
           "passed": true,
-          "detail": "Size=100: recall median=0.4ms, p95=0.5ms, store_total=38ms, needle_found=True",
-          "latency_ms": 0.39
+          "detail": "Size=100: recall median=0.2ms, p95=0.3ms, store_total=36ms, needle_found=True",
+          "latency_ms": 0.23
         },
         {
           "name": "scale_1000",
           "passed": true,
-          "detail": "Size=1,000: recall median=0.4ms, p95=0.4ms, store_total=348ms, needle_found=True",
-          "latency_ms": 0.37
+          "detail": "Size=1,000: recall median=0.3ms, p95=0.4ms, store_total=352ms, needle_found=True",
+          "latency_ms": 0.32
         },
         {
           "name": "scale_5000",
           "passed": true,
-          "detail": "Size=5,000: recall median=0.4ms, p95=0.5ms, store_total=1758ms, needle_found=True",
-          "latency_ms": 0.37
+          "detail": "Size=5,000: recall median=0.3ms, p95=0.4ms, store_total=1817ms, needle_found=True",
+          "latency_ms": 0.29
         },
         {
           "name": "scale_10000",
           "passed": true,
-          "detail": "Size=10,000: recall median=0.4ms, p95=0.5ms, store_total=4001ms, needle_found=True",
-          "latency_ms": 0.41
+          "detail": "Size=10,000: recall median=0.3ms, p95=0.4ms, store_total=3662ms, needle_found=True",
+          "latency_ms": 0.28
         }
       ]
     }

@@ -137,12 +137,12 @@ sessions as distractors.
 
 | Metric | OpenDB (pooled, 882 sessions) |
 |--------|--------|
-| **R@1** | 52.1% (245/470) |
+| **R@1** | 52.3% (246/470) |
 | **R@3** | 70.4% (331/470) |
 | **R@5** | **79.1% (372/470)** |
 | **R@10** | 86.4% (406/470) |
-| Median recall latency | 7.5 ms |
-| Mean / p95 recall latency | 9.6 ms / 22.5 ms |
+| Median recall latency | 7.4 ms |
+| Mean / p95 recall latency | 9.2 ms / 21.3 ms |
 
 Distractors per question: ~880.
 
@@ -376,13 +376,13 @@ it does.
 
 | Questions | R@1 | R@3 | R@5 | R@10 | Median recall |
 |---|:-:|:-:|:-:|:-:|:-:|
-| as written | **100%** (24/24) | 100% (24/24) | **100%** (24/24) | 100% (24/24) | 0.7 ms |
-| restated | 45.8% (11/24) | 66.7% (16/24) | **75.0%** (18/24) | 79.2% (19/24) | 0.5 ms |
+| as written | **100%** (24/24) | 100% (24/24) | **100%** (24/24) | 100% (24/24) | 0.5 ms |
+| restated | 45.8% (11/24) | 70.8% (17/24) | **79.2%** (19/24) | 79.2% (19/24) | 0.4 ms |
 
-95% CI on R@5: **[86.2%, 100%]** as written, **[55.1%, 88.0%]** restated.
+95% CI on R@5: **[86.2%, 100%]** as written, **[59.5%, 90.8%]** restated.
 
 Both rows run against the identical corpus, identical gold sessions and identical
-dates. **Only the question wording differs**, so the 25-point R@5 gap — and the
+dates. **Only the question wording differs**, so the 21-point R@5 gap — and the
 54-point R@1 gap — is attributable to wording and nothing else.
 
 The cause is measurable: across the 24 questions that have evidence, a mean
@@ -427,7 +427,7 @@ size it was measured at.
 Misses on the as-written questions are **reader** limitations rather than
 retrieval, since R@5 is 100% there and the right memory was always in context.
 That reasoning does not carry to the restated questions, where retrieval misses
-25% outright — an E2E run on the restated split has not been done, and the reader
+21% outright — an E2E run on the restated split has not been done, and the reader
 figures above should not be assumed to hold on it. The lone gpt-5.5 miss is
 `ms_oncall`, a 2-session synthesis where the reader surfaced one of the two
 required facts; gpt-5.4-mini misses that one plus `ku_default_branch`. Neither
@@ -465,7 +465,7 @@ A score with nothing to compare against says nothing about the retriever:
 |---|:-:|---|
 | random 5 of 18 sessions | 27.6% | chance floor |
 | first 5 sessions | 27.8% | position-only |
-| OpenDB, restated questions | 75.0% | |
+| OpenDB, restated questions | 79.2% | |
 | OpenDB, questions as written | 100% | |
 | oracle | 100% | ceiling |
 

@@ -51,7 +51,7 @@ evolves. **CodeMemEval** is OpenDB's purpose-built benchmark for exactly that.
 | | Result |
 |---|---|
 | **E2E accuracy** | **96.3%** (26/27) with gpt-5.5 · **92.6%** (25/27) with a cheap reader (gpt-5.4-mini) |
-| **Retrieval R@5** | **100%** (24/24) when questions share the codebase's vocabulary · **75%** (18/24) when restated with none of it |
+| **Retrieval R@5** | **100%** (24/24) when questions share the codebase's vocabulary · **79.2%** (19/24) when restated with none of it |
 | **Median recall** | **0.7 ms** against CodeMemEval's 18-session haystack · **7.5 ms** on the pooled 882-session LongMemEval corpus |
 | **Anti-hallucination (abstention)** | **3/3** — never invented a fact that wasn't in memory |
 
@@ -68,7 +68,7 @@ conversation-only layers (Mem0, Zep, Letta) don't have.
 > The two retrieval rows above run against an identical corpus with identical
 > gold sessions — **only the question wording differs**. Questions phrased in the
 > codebase's own vocabulary retrieve perfectly; the same questions restated with
-> zero lexical overlap drop to 75% at R@5 and 45.8% at R@1. That gap is the
+> zero lexical overlap drop to 79.2% at R@5 and 45.8% at R@1. That gap is the
 > honest boundary of a pure-lexical retriever, and CodeMemEval now measures it
 > instead of averaging it away.
 >

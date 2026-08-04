@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] — 2026-08-04
+
+### Fixed
+
+- **A superseded fact could outrank the fact that replaced it.** 2.0.0 shipped
+  `rank_weight_recency = 0.5`, and at that weight a stale memory won whenever it
+  matched one more query token than its replacement: lexical ratio-to-best
+  handed the older row a 0.53 edge while recency returned only 0.42 after
+  weighting. Two memories 947 and 795 days old, asked "frontend framework team"
+  — the row saying the team *migrated away* from React lost to the row saying it
+  uses React. The weight is now **0.75**; the inversion flips below 0.63.
+
+  This is the knowledge-update case the project is built around, and 2.0.0
+  regressed it against 1.5.0. It was caught by `memory_stress_bench.py`, whose
+  result 2.0.0 published as 23/23 while the shipped code scored 22/23.
+
+  | | 2.0.0 (0.5) | 2.0.1 (0.75) |
+  |---|:-:|:-:|
+  | memory stress suite | 22/23 | **23/23** |
+  | pooled LongMemEval R@5 | 79.1% | 79.1% |
+  | CodeMemEval R@5, questions as written | 100% | 100% |
+  | CodeMemEval R@5, questions restated | 75.0% | **79.2%** |
+  | temporal ranking suite top-1 | 80.0% | 80.0% |
+
+  Nothing regressed, including the two cases the temporal suite already fails.
+  That suite scores an identical 80.0% with identical per-category results for
+  every weight in [0.25, 1.5], so it cannot select this value and the choice
+  rests on the two suites that can see the difference.
+
+- **`RankingWeights` carried a second, independent default.** `from_settings`
+  reads the config value, but a bare `RankingWeights()` used the dataclass
+  default, so changing only `config.py` left every caller that skips settings
+  scoring against the old weights. Both are now asserted equal by a test.
+
+- **`ranking.py`'s module docstring described an algorithm the module does not
+  implement** — Reciprocal Rank Fusion for the lexical signal and a bare
+  hyperbolic map for recency. The code has used ratio-to-best and a
+  span-weighted blend since the rewrite. The docstring is the first thing
+  anyone reads when a ranking result looks wrong, and it sent two separate
+  investigations down the wrong path before the decomposition in `_explain`
+  showed what was actually happening.
+
+- Removed a duplicated `tier` assignment in `fuse()`.
+
 ## [2.0.0] — 2026-08-04
 
 Architecture review remediation. **This is a major version because four defaults
