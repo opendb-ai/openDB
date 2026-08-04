@@ -989,3 +989,126 @@ class TestTreeSitterSymbols:
         assert is_code_path("main.go")
         assert is_code_path("lib.rs")
         assert not is_code_path("README.md")
+
+
+# ======================================================================
+# Commit-anchored, self-invalidating code memory
+# ======================================================================
+
+class TestAnchoredMemories:
+    """A memory about code has an expiry date nobody records. Time-decay cannot
+    express it: the fact did not get gradually less true, it became false at a
+    specific commit."""
+
+    @staticmethod
+    async def _ingest(db, fid, path, text):
+        from opendb_core.parsers.base import Page, ParseResult
+        from opendb_core.utils.text import assemble_text
+
+        pr = ParseResult(pages=[Page(page_number=1, section_title=None, text=text)])
+        full, idx, toc, ranges = assemble_text(pr.pages, "text/x-go")
+        try:
+            await db.delete_file(fid)
+        except Exception:
+            pass
+        await db.persist_ingestion(
+            file_id=fid, file_path=f"/tmp/{fid}.go", original_filename=f"{fid}.go",
+            mime_type="text/x-go", file_size=len(text),
+            checksum=f"cs-{fid}-{abs(hash(text))}", tags=[],
+            merged_metadata={"source_path": path}, parse_result=pr, full_text=full,
+            total_lines=len(idx), line_index=idx, toc=toc, page_line_ranges=ranges,
+        )
+
+    async def _anchored(self, backend):
+        from opendb_core.utils.treesitter_intel import extract_symbols
+
+        src = "package gw\nfunc ValidateToken(t string) error {\n\treturn nil\n}\n"
+        await self._ingest(backend, "auth", "pkg/gateway/auth.go", src)
+        sym = next(s for s in extract_symbols(src, filename="auth.go")
+                   if s["name"] == "ValidateToken")
+        mid = await _store(backend, "Token validation lives in ValidateToken.")
+        await backend.anchor_memory(
+            memory_id=mid, file_path="pkg/gateway/auth.go", symbol="ValidateToken",
+            commit_sha="deadbeef", sig_hash=sym["sig_hash"], span_hash=sym["span_hash"],
+        )
+        return mid
+
+    @pytest.mark.asyncio
+    async def test_unchanged_code_leaves_the_anchor_current(self, backend) -> None:
+        await self._anchored(backend)
+        checks = await backend.revalidate_anchors()
+        assert [c.state for c in checks] == ["current"]
+        assert await backend.stale_anchors() == []
+
+    @pytest.mark.asyncio
+    async def test_body_edit_is_distinguished_from_signature_change(self, backend) -> None:
+        """A memory about behaviour survives a body edit; one about arguments
+        probably does not survive a signature change. Collapsing the two would
+        make the signal useless."""
+        await self._anchored(backend)
+        await self._ingest(
+            backend, "auth", "pkg/gateway/auth.go",
+            'package gw\nfunc ValidateToken(t string) error {\n\tif t == "" { return nil }\n\treturn nil\n}\n',
+        )
+        assert (await backend.revalidate_anchors())[0].state == "body_changed"
+
+        await self._ingest(
+            backend, "auth", "pkg/gateway/auth.go",
+            "package gw\nfunc ValidateToken(t string, aud string) error {\n\treturn nil\n}\n",
+        )
+        assert (await backend.revalidate_anchors())[0].state == "signature_changed"
+
+    @pytest.mark.asyncio
+    async def test_a_moved_symbol_reports_where_it_went(self, backend) -> None:
+        """"This may be out of date, it moved to X" beats silence."""
+        await self._anchored(backend)
+        await self._ingest(backend, "auth", "pkg/gateway/auth.go",
+                           "package gw\nfunc Unrelated() {}\n")
+        await self._ingest(backend, "authnew", "pkg/auth/token.go",
+                           "package auth\nfunc ValidateToken(t string) error {\n\treturn nil\n}\n")
+        check = (await backend.revalidate_anchors())[0]
+        assert check.state == "moved"
+        assert "pkg/auth/token.go" in check.detail
+        assert check.new_path == "pkg/auth/token.go"
+
+    @pytest.mark.asyncio
+    async def test_a_deleted_symbol_is_missing(self, backend) -> None:
+        await self._anchored(backend)
+        await self._ingest(backend, "auth", "pkg/gateway/auth.go",
+                           "package gw\nfunc Unrelated() {}\n")
+        assert (await backend.revalidate_anchors())[0].state == "missing"
+
+    @pytest.mark.asyncio
+    async def test_stale_anchors_are_surfaced_not_deleted(self, backend) -> None:
+        """Silently dropping memories would be the same class of mistake as the
+        destructive supersede this replaces."""
+        mid = await self._anchored(backend)
+        await self._ingest(backend, "auth", "pkg/gateway/auth.go",
+                           "package gw\nfunc Unrelated() {}\n")
+        await backend.revalidate_anchors()
+
+        stale = await backend.stale_anchors()
+        assert [s["state"] for s in stale] == ["missing"]
+        assert await backend.get_memory(mid) is not None, "the memory must survive"
+
+    @pytest.mark.asyncio
+    async def test_revalidation_can_be_scoped_to_changed_files(self, backend) -> None:
+        """Cost must be proportional to what changed, not to the store's size."""
+        await self._anchored(backend)
+        assert await backend.revalidate_anchors(["some/other/file.go"]) == []
+
+    @pytest.mark.asyncio
+    async def test_anchoring_is_idempotent(self, backend) -> None:
+        mid = await self._anchored(backend)
+        await backend.anchor_memory(
+            memory_id=mid, file_path="pkg/gateway/auth.go", symbol="ValidateToken",
+            commit_sha="cafebabe",
+        )
+        anchors = await backend.get_anchors(mid)
+        assert len(anchors) == 1
+        assert anchors[0]["commit_sha"] == "cafebabe"
+
+    @pytest.mark.asyncio
+    async def test_current_commit_returns_none_outside_a_repo(self, tmp_path) -> None:
+        from opendb_core.services.anchor_service import current_commit
+        assert await current_commit(tmp_path) is None

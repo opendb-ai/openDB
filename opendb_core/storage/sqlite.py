@@ -26,6 +26,7 @@ from opendb_core.storage.shared import (
     sqlite_file_row,
 )
 from opendb_core.storage._sqlite_memory import SQLiteMemoryMixin
+from opendb_core.services.anchor_service import AnchorMixin
 from opendb_core.storage._sqlite_txn import SQLiteTxnMixin, apply_connection_pragmas
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,33 @@ CREATE TABLE IF NOT EXISTS opendb_meta (
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
 
+-- Anchors: what a memory was true *of*.
+--
+-- A memory about code has an expiry date nobody records. "Auth lives in
+-- pkg/gateway/middleware/auth.go" is true until someone moves it, and then it
+-- is worse than useless. Time-decay cannot express that: the fact did not get
+-- gradually less true, it became false at a specific commit.
+CREATE TABLE IF NOT EXISTS memory_anchors (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id   TEXT NOT NULL,
+    file_path   TEXT NOT NULL,
+    symbol      TEXT,
+    commit_sha  TEXT,
+    sig_hash    TEXT,
+    span_hash   TEXT,
+    state       TEXT NOT NULL DEFAULT 'current',
+    detail      TEXT NOT NULL DEFAULT '',
+    new_path    TEXT,
+    checked_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_anchors_unique
+    ON memory_anchors(memory_id, file_path, COALESCE(symbol, ''));
+CREATE INDEX IF NOT EXISTS idx_memory_anchors_file ON memory_anchors(file_path);
+CREATE INDEX IF NOT EXISTS idx_memory_anchors_state
+    ON memory_anchors(state) WHERE state != 'current';
+
 -- -----------------------------------------------------------------
 -- Eval capture (opt-in)
 -- -----------------------------------------------------------------
@@ -265,7 +293,7 @@ END;
 """
 
 
-class SQLiteBackend(SQLiteTxnMixin, SQLiteMemoryMixin):
+class SQLiteBackend(SQLiteTxnMixin, SQLiteMemoryMixin, AnchorMixin):
     """SQLite + FTS5 implementation of StorageBackend.
 
     Usage::
@@ -1220,14 +1248,17 @@ class SQLiteBackend(SQLiteTxnMixin, SQLiteMemoryMixin):
                 int(symbol.get("end_line") or symbol.get("start_line") or 1),
                 str(symbol.get("signature") or "")[:1000],
                 str(symbol.get("docstring") or "")[:2000],
+                symbol.get("sig_hash"),
+                symbol.get("span_hash"),
             ))
         if not rows:
             return 0
         await self._wdb.executemany(
             """
             INSERT INTO code_symbols
-                (file_id, name, kind, qualified_name, start_line, end_line, signature, docstring)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (file_id, name, kind, qualified_name, start_line, end_line,
+                 signature, docstring, sig_hash, span_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -1471,6 +1502,43 @@ async def _m6_bitemporal_validity(backend: "SQLiteBackend", conn) -> None:
     )
 
 
+async def _m7_memory_anchors(backend: "SQLiteBackend", conn) -> None:
+    """Anchor table plus the symbol hashes revalidation compares against."""
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS memory_anchors (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            memory_id   TEXT NOT NULL,
+            file_path   TEXT NOT NULL,
+            symbol      TEXT,
+            commit_sha  TEXT,
+            sig_hash    TEXT,
+            span_hash   TEXT,
+            state       TEXT NOT NULL DEFAULT 'current',
+            detail      TEXT NOT NULL DEFAULT '',
+            new_path    TEXT,
+            checked_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+        )
+        """
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_anchors_unique "
+        "ON memory_anchors(memory_id, file_path, COALESCE(symbol, ''))"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_anchors_file ON memory_anchors(file_path)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_anchors_state "
+        "ON memory_anchors(state) WHERE state != 'current'"
+    )
+    cols = {r[1] for r in await (await conn.execute("PRAGMA table_info(code_symbols)")).fetchall()}
+    for col in ("sig_hash", "span_hash"):
+        if col not in cols:
+            await conn.execute(f"ALTER TABLE code_symbols ADD COLUMN {col} TEXT")
+
+
 # (version, name, coroutine). Append only; never renumber.
 _MIGRATIONS = [
     (1, "memory_provenance_columns", _m1_memory_columns),
@@ -1479,4 +1547,5 @@ _MIGRATIONS = [
     (4, "drop_memories_updated_trigger", _m4_drop_memories_updated_trigger),
     (5, "record_tokenizer_fingerprint", _m5_record_tokenizer_fingerprint),
     (6, "bitemporal_validity", _m6_bitemporal_validity),
+    (7, "memory_anchors", _m7_memory_anchors),
 ]
