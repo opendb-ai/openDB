@@ -156,6 +156,52 @@ It now passes the same conformance suite as SQLite.
 - Readers and writers use separate SQLite connections, so a reader can no longer
   observe another coroutine's uncommitted rows.
 
+### Benchmark methodology — CodeMemEval
+
+`benchmark/codemem_hard.py` answers, with numbers, the four objections that sink
+CodeMemEval as previously published. None of it needs an API key: `gen_codemem`
+imports the OpenAI client at module scope, so the facts are read with
+`ast.literal_eval` instead — a methodology check that requires a paid credential
+is a methodology check nobody runs.
+
+- **Every score is published with its interval.** 96.3% is 26/27, whose 95%
+  Wilson interval is [81.7%, 99.3%] — 17.6 points wide. It overlaps the cheap
+  reader's 92.6% [76.6%, 97.9%] across almost its whole width, so the benchmark
+  cannot actually distinguish the two readers, and the README and REPORT no
+  longer imply that it can. Per-category results rest on n = 3–6 and are now
+  reported as counts rather than percentages. Reaching ±2pp needs n = 457.
+- **The questions restated the evidence.** Across the 24 questions that have
+  evidence, a mean 53.4% of question tokens appear verbatim in the fact being
+  asked about, so a lexical retriever won part of the set by construction.
+  `PARAPHRASE_QUESTIONS` now covers **every** question with a 0.0%-overlap
+  restatement, and `--emit-paraphrase` writes them as a dataset with identical
+  haystacks and gold sessions, so the retrieval harness scores the hard split
+  directly:
+
+  | | R@1 | R@5 |
+  |---|:-:|:-:|
+  | questions as written | 100% (24/24) | 100% (24/24) |
+  | restated | 45.8% (11/24) | 75.0% (18/24) |
+
+  One question returns **zero** results. This is the honest boundary of a
+  pure-lexical retriever, and it was previously averaged away.
+- **The judge is unvalidated, and now says so.** Both accuracy figures come from
+  an LLM judge sharing a model family with the reader it grades, and nothing had
+  measured how often it accepts a wrong answer. `--run-judge` scores 10
+  hand-written plausible-but-false answers, 7 correct answers restated in other
+  words, and the 17 gold answers verbatim. Both halves are required: a judge that
+  answers INCORRECT to everything scores a flawless 0% false-accept rate, and
+  only the correct-answer controls expose it. It refuses to report a rate if any
+  call errored, since `judge_answer` scores a failed call as a rejection — an
+  expired credential would otherwise print a perfect result. **The rate has not
+  yet been measured**, so the E2E figures stand as upper bounds.
+- **Baselines.** Random 5-of-18 is a 27.6% chance floor and the oracle is 100%,
+  so a headline can be read against something.
+- Two categories the flat question/answer shape could not express: `temporal`
+  (the same fact asked about now and then — a store that overwrites on update
+  cannot answer the second) and `staleness` (scored on whether the system flags
+  a memory a later commit made false, not merely on whether it answers).
+
 ### Removed
 
 - **The "100% R@5" retrieval claim.** It was measured on

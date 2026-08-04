@@ -1,3 +1,8 @@
+# Derived from codemem_dataset.json by `codemem_hard.py --emit-paraphrase`.
+# Deterministic, needs no API key, and duplicates every haystack verbatim —
+# regenerate it rather than carrying a second copy in the repo.
+codemem_paraphrase.json
+
 # Generated workspaces and caches
 benchmark_workspace_*/
 benchmark_workspace/

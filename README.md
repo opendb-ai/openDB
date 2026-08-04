@@ -18,7 +18,7 @@
 
 <p align="center">
   <b>Purpose-built long-term memory for coding agents.</b><br/>
-  <b>79.1% R@5</b> retrieval on a pooled 882-session corpus · <b>7.5 ms</b> median recall · <b>96.3%</b> on CodeMemEval (n=27).<br/>
+  <b>79.1% R@5</b> retrieval on a pooled 882-session corpus · <b>7.5 ms</b> median recall · <b>96.3%</b> on CodeMemEval (26/27, 95% CI [82%, 99%]).<br/>
   Remember architecture decisions, conventions, APIs, and bug fixes across sessions —
   and read the actual code. Zero embedding APIs. Zero vector databases. Just SQLite FTS5 and good engineering.
 </p>
@@ -50,27 +50,48 @@ evolves. **CodeMemEval** is OpenDB's purpose-built benchmark for exactly that.
 
 | | Result |
 |---|---|
-| **E2E accuracy** | **92.6%** with a cheap reader (gpt-5.4-mini) · **96.3%** with gpt-5.5 |
-| **Retrieval R@5** | **79.1%** on the pooled LongMemEval corpus (880 distractors/question) |
-| **Median recall** | **7.5 ms** at 882 sessions |
-| **Anti-hallucination (abstention)** | **100%** — never invents facts not in memory |
+| **E2E accuracy** | **96.3%** (26/27) with gpt-5.5 · **92.6%** (25/27) with a cheap reader (gpt-5.4-mini) |
+| **Retrieval R@5** | **100%** (24/24) when questions share the codebase's vocabulary · **75%** (18/24) when restated with none of it |
+| **Median recall** | **0.7 ms** against CodeMemEval's 18-session haystack · **7.5 ms** on the pooled 882-session LongMemEval corpus |
+| **Anti-hallucination (abstention)** | **3/3** — never invented a fact that wasn't in memory |
 
-Perfect (100%) on architecture, conventions, API signatures, bug-fixes, code
-locations, and knowledge-updates (with gpt-5.5). Coding memory is dominated by *exact identifiers* (`CreateInvoice`,
-`:9090`, `pkg/gateway/middleware/auth.go`, `RFC 7807`) — precisely where lexical
-FTS beats embedding similarity, and where OpenDB pairs memory with real code
-reading that conversation-only layers (Mem0, Zep, Letta) don't have.
+Coding memory is dominated by *exact identifiers* (`CreateInvoice`, `:9090`,
+`pkg/gateway/middleware/auth.go`, `RFC 7807`) — precisely where lexical FTS beats
+embedding similarity, and where OpenDB pairs memory with real code reading that
+conversation-only layers (Mem0, Zep, Letta) don't have.
+
+> **Read the numbers with their error bars.** At n = 27 a 95% interval is about
+> 18 points wide: 96.3% is [82%, 99%] and 92.6% is [77%, 98%], so this benchmark
+> **cannot** distinguish those two readers. Per-category results rest on n = 3–6
+> and are reported as counts, not percentages.
+>
+> The two retrieval rows above run against an identical corpus with identical
+> gold sessions — **only the question wording differs**. Questions phrased in the
+> codebase's own vocabulary retrieve perfectly; the same questions restated with
+> zero lexical overlap drop to 75% at R@5 and 45.8% at R@1. That gap is the
+> honest boundary of a pure-lexical retriever, and CodeMemEval now measures it
+> instead of averaging it away.
+>
+> The E2E accuracies come from an **unvalidated LLM judge** sharing a model family
+> with the reader it grades; treat them as upper bounds until
+> `codemem_hard.py --run-judge` has reported its false-accept rate.
 
 ```bash
 # Reproduce (uses the same harness as LongMemEval)
 python benchmark/gen_codemem.py --model gpt-5.5
 python benchmark/longmemeval_e2e_bench.py --data benchmark/codemem_dataset.json \
     --model gpt-5.4-mini --judge-model gpt-5.4-mini
+
+# Methodology checks — intervals, question/evidence overlap, baselines (no API key)
+python benchmark/codemem_hard.py --all
+python benchmark/codemem_hard.py --emit-paraphrase
+python benchmark/longmemeval_bench.py --data benchmark/codemem_paraphrase.json
 ```
 
 Full methodology: [benchmark/REPORT.md → Part 8](benchmark/REPORT.md). The dataset
 generator is hand-authored ground truth (LLM only renders transcripts), so it's
-extensible — add facts to grow coverage.
+extensible — add facts to grow coverage, which is the main thing this benchmark
+needs: ±2pp on a ~95% accuracy requires n = 457.
 
 ## LongMemEval Benchmark — 93.6%
 

@@ -1154,23 +1154,32 @@ class TestCodeMemEvalHard:
 
     def test_paraphrases_have_far_lower_overlap_than_originals(self) -> None:
         """The point of the split: a system that only scores on the high-overlap
-        half has been measured on the wrong thing."""
+        half has been measured on the wrong thing.
+
+        Measured over every question that has evidence, not only the ones drawn
+        from FACTS. Knowledge-update and multi-session questions are two thirds
+        of the remainder, and a statistic quoted for the benchmark has to cover
+        the benchmark.
+        """
         m = self._mod()
-        facts = {f["id"]: f for f in m._load_facts()}
         orig, para = [], []
-        for fid, q in m.PARAPHRASE_QUESTIONS.items():
-            f = facts[fid]
-            ev = m._tokens(f["fact"])
-            for question, bucket in ((f["question"], orig), (q, para)):
+        for qid, item in m._evidence_index().items():
+            if not item["evidence"]:
+                continue  # abstention questions have nothing to overlap with
+            ev = m._tokens(item["evidence"])
+            for question, bucket in ((item["question"], orig),
+                                     (m.PARAPHRASE_QUESTIONS[qid], para)):
                 qt = m._tokens(question)
                 bucket.append(len(qt & ev) / len(qt) if qt else 0.0)
         assert sum(orig) / len(orig) > 0.4
         assert sum(para) / len(para) < 0.15
 
-    def test_every_paraphrase_targets_a_real_fact(self) -> None:
+    def test_every_question_has_a_paraphrase_and_every_paraphrase_a_question(self) -> None:
+        """Coverage has to run both ways. Scoring the subset that happens to
+        have restatements, then quoting it as the paraphrase result, reproduces
+        the small-n error this module was written to name."""
         m = self._mod()
-        ids = {f["id"] for f in m._load_facts()}
-        assert set(m.PARAPHRASE_QUESTIONS) <= ids
+        assert set(m.PARAPHRASE_QUESTIONS) == set(m._evidence_index())
 
     def test_adversarial_answers_are_wrong_but_plausible(self) -> None:
         """A judge that accepts these is not measuring correctness."""

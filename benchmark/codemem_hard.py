@@ -11,21 +11,23 @@ a number rather than an argument:
    reports the interval alongside any score, and says how many questions a claim
    of a given precision would actually need.
 
-2. **The questions restate the evidence.** Measured over the 17 hand-authored
-   facts, 60% of question tokens appear verbatim in the fact they ask about
-   (65% when measured against the rendered sessions). A lexical retriever
-   therefore wins part of the set by construction. `--overlap`
-   measures this per item, and `PARAPHRASE_QUESTIONS` supplies zero-overlap
-   restatements of the same facts so the two can be scored separately. A system
-   that only scores well on the high-overlap half has been measured on the wrong
-   thing.
+2. **The questions restate the evidence.** A large share of question tokens
+   appear verbatim in the fact they ask about, so a lexical retriever wins part
+   of the set by construction. `--overlap` measures this per item, and
+   `PARAPHRASE_QUESTIONS` supplies zero-overlap restatements of *every*
+   question so the two can be scored separately. `--emit-paraphrase` writes
+   those as a dataset in the same schema, so the retrieval harness scores the
+   hard split directly rather than the reader being asked to imagine it.
 
 3. **Generator, reader and judge are the same model family.** An LLM judge that
    shares a lineage with the answerer inflates scores, and nothing measured how
    often this one accepts a wrong answer. `ADVERSARIAL_ANSWERS` are hand-written
-   wrong answers — plausible, specific, and false — that a judge must reject.
-   `--judge-validation` reports the false-accept rate. Publish it even when it
-   is bad; an unvalidated judge is not evidence.
+   wrong answers — plausible, specific, and false — that a judge must reject;
+   `EQUIVALENT_ANSWERS` restate the gold answer in other words, and a judge must
+   accept those. Both halves are needed, because a judge that rejects everything
+   scores a perfect false-accept rate. `--run-judge` calls the real judge and
+   reports both rates. Publish them even when they are bad; an unvalidated judge
+   is not evidence.
 
 4. **No baselines.** A score with nothing to compare against says nothing about
    the retriever. `--baselines` gives the chance floor and the oracle ceiling,
@@ -42,6 +44,11 @@ Usage::
     python benchmark/codemem_hard.py --power --results benchmark/codemem_e2e_gpt55.json
     python benchmark/codemem_hard.py --judge-validation
     python benchmark/codemem_hard.py --all
+
+    # the two that do more than print (one writes a file, one spends money):
+    python benchmark/codemem_hard.py --emit-paraphrase
+    python benchmark/longmemeval_bench.py --data benchmark/codemem_paraphrase.json
+    python benchmark/codemem_hard.py --run-judge --judge-model openai/gpt-5.4-mini
 """
 
 from __future__ import annotations
@@ -61,17 +68,62 @@ sys.path.insert(0, str(BENCH.parent))
 # ----------------------------------------------------------------------
 # Paraphrases: the same facts asked in words the evidence does not use.
 # ----------------------------------------------------------------------
-# Keyed by the fact id in gen_codemem.FACTS. Each restates the question with
-# minimal lexical overlap, so lexical and semantic retrieval can be scored
-# apart instead of being averaged into one number that hides the difference.
+# Keyed by the item id in gen_codemem's FACTS / UPDATES / MULTI / ABSTAIN.
+# Each restates the question with minimal lexical overlap, so lexical and
+# semantic retrieval can be scored apart instead of being averaged into one
+# number that hides the difference.
+#
+# Coverage is deliberately total. A paraphrase split that covered 7 of 27
+# questions would be reported at n = 7, where the confidence interval spans
+# most of the range -- the exact failure this module exists to name. Every
+# non-abstention question therefore has a restatement, and `--emit-paraphrase`
+# refuses to write a dataset if any question is missing one.
 PARAPHRASE_QUESTIONS: dict[str, str] = {
+    # -- code-architecture --
     "arch_billing_db": "Where do we keep money records, and what made us rule out the document store?",
     "arch_event_bus": "How do our components talk to each other asynchronously?",
     "arch_auth": "How does a request prove who it belongs to?",
     "arch_routing_cache": "Do we memoise path computations anywhere, and for how long?",
+    # -- code-convention --
     "conv_error": "What shape should a failed response take?",
-    "conv_naming": "How should I name a new endpoint entry point?",
+    "conv_naming": "When I add a new endpoint entry function, what should it be called?",
     "conv_migrations": "What are the ground rules when altering the schema?",
+    "conv_tests": "When a test exercises the whole stack, must it talk to real backing "
+                  "services or can it substitute fakes?",
+    # -- api-signature --
+    "api_create_invoice": "What arguments does the call that produces a customer bill take, "
+                          "and how do you stop a repeated request from creating two?",
+    "api_route_endpoint": "Which URL do I call to work out a shipment path, and what fields "
+                          "go in the payload?",
+    "api_telemetry": "How do vehicles push their sensor readings into the platform, and what "
+                     "call shape does that use?",
+    # -- bug-fix --
+    "bug_tz": "Why did payment deadlines land on the wrong date for people east of Greenwich, "
+              "and what corrected it?",
+    "bug_nats_redeliver": "Why did customers get the same delivery alert twice, and how was "
+                          "that stopped?",
+    "bug_redis_stampede": "Why did path lookups get slow at peak traffic, and what change made "
+                          "them fast again?",
+    # -- code-location --
+    "loc_auth_mw": "Which file holds the code that checks credentials on the way in?",
+    "loc_migrations": "Which directory contains the schema change scripts for the invoicing "
+                      "component?",
+    "loc_protos": "Where do the interface schema files and their machine-produced bindings sit?",
+    # -- knowledge-update (evidence is the newer session) --
+    "ku_orders_proto": "How do callers reach the ordering component today, and on which socket?",
+    "ku_deploy": "What mechanism pushes code into the live environment these days?",
+    "ku_logging": "Which package emits diagnostic records, and in what shape?",
+    "ku_default_branch": "How many sign-offs and what checks must land before code can go into "
+                         "the trunk?",
+    # -- multi-session (evidence spans two sessions) --
+    "ms_deploy_pipeline": "What has to be true of a build artifact for the cluster to accept it?",
+    "ms_invoice_flow": "Trace what happens between a package arriving and the customer being "
+                       "billed.",
+    "ms_oncall": "Who gets woken up when something breaks in prod, and what must they do first?",
+    # -- abstention (no evidence exists; excluded from the overlap statistic) --
+    "abs_redis_version": "Which release of the cache server is deployed for path lookups?",
+    "abs_frontend_fw": "What does the customer-facing web UI get built with?",
+    "abs_db_password": "Where does the live datastore credential sit?",
 }
 
 # ----------------------------------------------------------------------
@@ -112,6 +164,37 @@ ADVERSARIAL_ANSWERS: list[dict] = [
     {"fact_id": "conv_migrations",
      "wrong": "Use Flyway, append-only and reversible.",
      "why": "wrong tool"},
+]
+
+# The control the false-accept rate is meaningless without. A judge that
+# answers INCORRECT to everything scores a perfect 0% false-accept rate, so
+# the adversarial set alone cannot distinguish a strict judge from a broken
+# one. These say the same thing as the gold answer in different words -- a
+# judge that rejects them is grading wording, not correctness, and a reader's
+# answer never arrives phrased exactly like the gold.
+EQUIVALENT_ANSWERS: list[dict] = [
+    {"fact_id": "arch_billing_db",
+     "right": "Postgres, version 15. MongoDB lost out because billing has to update "
+              "several rows atomically."},
+    {"fact_id": "arch_event_bus",
+     "right": "They run NATS JetStream. Kafka was passed over as too much operational "
+              "weight, and losing the odd telemetry point was acceptable."},
+    {"fact_id": "arch_auth",
+     "right": "identity-service mints JWTs that expire after a quarter of an hour; the "
+              "gateway checks them against the public JWKS, and individual services "
+              "never call back to verify."},
+    {"fact_id": "arch_routing_cache",
+     "right": "Cached in Redis for six hours, under a composite key of start hub, end "
+              "hub and vehicle class."},
+    {"fact_id": "conv_error",
+     "right": "Everything comes back as problem+json per RFC 7807, always constructed "
+              "through the shared problem.New helper rather than a raw string."},
+    {"fact_id": "conv_naming",
+     "right": "Prefix with handle, then the resource in PascalCase -- handleCreateInvoice, "
+              "for instance. A linter rule (lint-handler-name) checks it."},
+    {"fact_id": "conv_migrations",
+     "right": "golang-migrate, add-only, and every up ships with a matching down so it can "
+              "be rolled back. Once a migration is merged you leave it alone."},
 ]
 
 # ----------------------------------------------------------------------
@@ -177,8 +260,8 @@ def n_for_precision(p: float, half_width: float, z: float = 1.96) -> int:
     return math.ceil(z * z * p * (1 - p) / (half_width * half_width))
 
 
-def _load_facts() -> list[dict]:
-    """Read FACTS out of gen_codemem without executing it.
+def _load_group(name: str) -> list[dict]:
+    """Read one top-level list out of gen_codemem without executing it.
 
     `gen_codemem` imports the OpenAI client at module scope, so importing it
     needs an API key. None of the analysis here calls a model, and a
@@ -191,9 +274,40 @@ def _load_facts() -> list[dict]:
     for node in tree.body:
         targets = getattr(node, "targets", []) or [getattr(node, "target", None)]
         for t in targets:
-            if isinstance(t, ast.Name) and t.id == "FACTS":
+            if isinstance(t, ast.Name) and t.id == name:
                 return ast.literal_eval(node.value)
-    raise RuntimeError("FACTS not found in gen_codemem.py")
+    raise RuntimeError(f"{name} not found in gen_codemem.py")
+
+
+def _load_facts() -> list[dict]:
+    return _load_group("FACTS")
+
+
+def _evidence_index() -> dict[str, dict]:
+    """Map every question id to its question text and its gold evidence.
+
+    The four groups store evidence under different keys, and measuring overlap
+    on FACTS alone describes 17 of the 27 questions. Knowledge-update items are
+    scored against the *newer* session, which is the one the gold answer comes
+    from; multi-session items against both of their sessions joined, since
+    either one appearing is a retrieval hit. Abstention items carry no
+    evidence and are excluded from the overlap statistic rather than counted
+    as zero, which would silently dilute it.
+    """
+    index: dict[str, dict] = {}
+    for f in _load_group("FACTS"):
+        index[f["id"]] = {"question": f["question"], "evidence": f["fact"],
+                          "type": f["type"], "group": "fact"}
+    for u in _load_group("UPDATES"):
+        index[u["id"]] = {"question": u["question"], "evidence": u["new_fact"],
+                          "type": u["type"], "group": "update"}
+    for m in _load_group("MULTI"):
+        index[m["id"]] = {"question": m["question"], "evidence": " ".join(m["facts"]),
+                          "type": m["type"], "group": "multi"}
+    for a in _load_group("ABSTAIN"):
+        index[a["id"]] = {"question": a["question"], "evidence": None,
+                          "type": a["type"], "group": "abstain"}
+    return index
 
 
 # ----------------------------------------------------------------------
@@ -201,21 +315,21 @@ def _load_facts() -> list[dict]:
 # ----------------------------------------------------------------------
 
 def report_overlap() -> dict:
-    """How much of each question is already present in its own answer."""
-    facts = _load_facts()
-    rows = []
-    for f in facts:
-        q, ev = _tokens(f["question"]), _tokens(f["fact"])
-        cover = len(q & ev) / len(q) if q else 0.0
-        rows.append({"id": f["id"], "type": f["type"], "coverage": cover})
+    """How much of each question is already present in its own evidence."""
+    index = _evidence_index()
+    scored = {qid: item for qid, item in index.items() if item["evidence"]}
 
-    para = []
-    for fid, question in PARAPHRASE_QUESTIONS.items():
-        f = next((x for x in facts if x["id"] == fid), None)
-        if not f:
-            continue
-        q, ev = _tokens(question), _tokens(f["fact"])
-        para.append({"id": fid, "coverage": len(q & ev) / len(q) if q else 0.0})
+    rows, para = [], []
+    for qid, item in scored.items():
+        ev = _tokens(item["evidence"])
+        q = _tokens(item["question"])
+        rows.append({"id": qid, "type": item["type"],
+                     "coverage": len(q & ev) / len(q) if q else 0.0})
+        restated = PARAPHRASE_QUESTIONS.get(qid)
+        if restated:
+            p = _tokens(restated)
+            para.append({"id": qid, "type": item["type"],
+                         "coverage": len(p & ev) / len(p) if p else 0.0})
 
     base = [r["coverage"] for r in rows]
     print("Question/evidence lexical overlap")
@@ -228,11 +342,57 @@ def report_overlap() -> dict:
         pc = [r["coverage"] for r in para]
         print(f"  paraphrased          n={len(pc):3d}  mean {statistics.mean(pc)*100:5.1f}%"
               f"  median {statistics.median(pc)*100:5.1f}%")
+        worst = max(para, key=lambda r: r["coverage"])
+        print(f"    worst case: {worst['id']} at {worst['coverage']*100:.1f}%")
+
+    missing = [qid for qid in index if qid not in PARAPHRASE_QUESTIONS]
+    if missing:
+        print(f"  MISSING paraphrases: {', '.join(sorted(missing))}")
+    print(f"  (abstention questions carry no evidence and are excluded: "
+          f"{len(index) - len(scored)})")
     print()
     print("  A lexical retriever wins part of the original split by construction.")
     print("  Score the two halves separately; a single average hides which one")
-    print("  the system is actually good at.")
-    return {"original": rows, "paraphrase": para}
+    print("  the system is actually good at. `--emit-paraphrase` writes the")
+    print("  restated set as a dataset so the retrieval harness can score it.")
+    return {"original": rows, "paraphrase": para, "missing": missing}
+
+
+def emit_paraphrase(source: Path, dest: Path) -> dict:
+    """Write a dataset variant whose questions share no wording with the evidence.
+
+    Everything except the question text is copied verbatim -- same haystacks,
+    same gold session ids, same dates -- so a score difference against the
+    original is attributable to the question wording and nothing else.
+    """
+    data = json.loads(source.read_text())
+    missing, out = [], []
+    for q in data:
+        qid = q["question_id"]
+        base_id = qid[:-4] if qid.endswith("_abs") else qid
+        restated = PARAPHRASE_QUESTIONS.get(base_id)
+        if not restated:
+            missing.append(qid)
+            continue
+        item = dict(q)
+        item["question"] = restated
+        item["original_question"] = q["question"]
+        out.append(item)
+
+    if missing:
+        raise SystemExit(
+            f"No paraphrase for {len(missing)} question(s): {', '.join(missing)}.\n"
+            "Refusing to write a partial split -- scoring a subset and quoting it "
+            "as the paraphrase result is the small-n error this module exists to name."
+        )
+
+    dest.write_text(json.dumps(out, indent=2, ensure_ascii=False))
+    print(f"Wrote {len(out)} paraphrased questions to {dest}")
+    print()
+    print("  Score both and compare:")
+    print(f"    python benchmark/longmemeval_bench.py --data {source.name}")
+    print(f"    python benchmark/longmemeval_bench.py --data {dest.name}")
+    return {"n": len(out), "path": str(dest)}
 
 
 def report_power(results_path: Path | None) -> dict:
@@ -281,11 +441,116 @@ def report_judge_validation() -> dict:
         print(f"    gold:  {f['answer']}")
         print(f"    wrong: {a['wrong']}")
         print()
-    print("  Feed these to the judge alongside the gold answers. The false-accept")
-    print("  rate is the number it marks correct, divided by the number here.")
-    print("  Publish it even when it is bad: an unvalidated judge -- especially")
-    print("  one sharing a model family with the answerer -- is not evidence.")
+    print("  Run `--run-judge --judge-model MODEL` to score these against a real")
+    print("  judge. The false-accept rate is the number it marks correct, divided")
+    print("  by the number here. Publish it even when it is bad: an unvalidated")
+    print("  judge -- especially one sharing a model family with the answerer --")
+    print("  is not evidence.")
     return {"n": len(ADVERSARIAL_ANSWERS), "cases": ADVERSARIAL_ANSWERS}
+
+
+def run_judge(judge_model: str, concurrency: int = 4) -> dict:
+    """Score the validation set against a real judge and report both error rates.
+
+    Calls the same `judge_answer` the E2E benchmark grades with, so the number
+    describes the instrument that produced the published accuracy rather than
+    a re-implementation of it.
+    """
+    import asyncio
+
+    sys.path.insert(0, str(BENCH))
+    try:
+        from longmemeval_e2e_bench import judge_answer  # noqa: PLC0415
+    except Exception as e:  # pragma: no cover - depends on optional deps
+        raise SystemExit(
+            f"Could not import the judge from longmemeval_e2e_bench: {e}\n"
+            "Install the benchmark extras and set OPENROUTER_API_KEY."
+        )
+
+    facts = {f["id"]: f for f in _load_facts()}
+    cases: list[dict] = []
+    for a in ADVERSARIAL_ANSWERS:
+        f = facts[a["fact_id"]]
+        cases.append({"cell": "adversarial", "fact_id": a["fact_id"], "why": a["why"],
+                      "question": f["question"], "gold": f["answer"],
+                      "candidate": a["wrong"], "should_accept": False})
+    for e in EQUIVALENT_ANSWERS:
+        f = facts[e["fact_id"]]
+        cases.append({"cell": "restated", "fact_id": e["fact_id"], "why": "same fact, other words",
+                      "question": f["question"], "gold": f["answer"],
+                      "candidate": e["right"], "should_accept": True})
+    for fid, f in facts.items():
+        cases.append({"cell": "verbatim", "fact_id": fid, "why": "gold answer unchanged",
+                      "question": f["question"], "gold": f["answer"],
+                      "candidate": f["answer"], "should_accept": True})
+
+    async def _run() -> None:
+        sem = asyncio.Semaphore(concurrency)
+
+        async def one(c: dict) -> None:
+            async with sem:
+                accepted, _score, explanation, _ms = await judge_answer(
+                    c["question"], c["gold"], c["candidate"], judge_model
+                )
+            c["accepted"] = bool(accepted)
+            c["explanation"] = str(explanation)[:200]
+
+        await asyncio.gather(*(one(c) for c in cases))
+
+    print("Judge validation -- measured")
+    print("=" * 64)
+    print(f"  judge model: {judge_model}")
+    print(f"  {len(cases)} calls: {sum(1 for c in cases if c['cell'] == 'adversarial')} "
+          f"adversarial, {sum(1 for c in cases if c['cell'] == 'restated')} restated-correct, "
+          f"{sum(1 for c in cases if c['cell'] == 'verbatim')} verbatim-gold")
+    print()
+    asyncio.run(_run())
+
+    errored = [c for c in cases if c["explanation"].startswith(("Judge error", "Judge returned"))]
+    if errored:
+        raise SystemExit(
+            f"{len(errored)}/{len(cases)} judge calls failed "
+            f"(first: {errored[0]['explanation']}). Not reporting a rate computed "
+            "from failed calls -- a call that errored is scored as a rejection by "
+            "`judge_answer`, which would understate the false-accept rate."
+        )
+
+    out: dict = {"judge_model": judge_model, "cells": {}, "cases": cases}
+    print(f"  {'cell':22} {'expected':>10} {'errors':>8}   rate")
+    print(f"  {'-'*22} {'-'*10:>10} {'-'*8:>8}   {'-'*28}")
+    for cell, expect_accept, err_name in (
+        ("adversarial", False, "false-accept"),
+        ("restated", True, "false-reject"),
+        ("verbatim", True, "false-reject"),
+    ):
+        group = [c for c in cases if c["cell"] == cell]
+        errs = [c for c in group if c["accepted"] is not expect_accept]
+        lo, hi = wilson(len(errs), len(group))
+        print(f"  {cell:22} {'accept' if expect_accept else 'reject':>10} "
+              f"{len(errs):>3}/{len(group):<4}   {err_name} "
+              f"{len(errs)/len(group)*100:5.1f}%  95% CI [{lo*100:.1f}%, {hi*100:.1f}%]")
+        out["cells"][cell] = {"n": len(group), "errors": len(errs),
+                              "rate": len(errs) / len(group), "ci": [lo, hi]}
+
+    misjudged = [c for c in cases if c["accepted"] is not c["should_accept"]]
+    if misjudged:
+        print()
+        print("  Disagreements:")
+        for c in misjudged:
+            verdict = "accepted a wrong answer" if c["accepted"] else "rejected a correct answer"
+            print(f"    [{c['cell']}/{c['fact_id']}] {verdict} -- {c['why']}")
+            print(f"      candidate: {c['candidate'][:96]}")
+    print()
+    fa = out["cells"]["adversarial"]
+    if fa["errors"]:
+        print(f"  The judge accepted {fa['errors']} of {fa['n']} answers built to be wrong.")
+        print("  Any accuracy it produced is an upper bound, not a measurement.")
+    else:
+        print("  The judge rejected every adversarial answer, and the correct-answer")
+        print("  controls show it is not simply rejecting everything.")
+    print(f"  n is small here too: the interval on the adversarial cell is "
+          f"{(fa['ci'][1] - fa['ci'][0]) * 100:.1f}pp wide.")
+    return out
 
 
 def report_baselines() -> dict:
@@ -338,7 +603,35 @@ def main() -> None:
     ap.add_argument("--all", action="store_true")
     ap.add_argument("--results", type=Path, default=None)
     ap.add_argument("--output", type=Path, default=None)
+    ap.add_argument(
+        "--emit-paraphrase", nargs="?", type=Path, const=BENCH / "codemem_paraphrase.json",
+        default=None,
+        help="Write a dataset variant whose questions share no wording with the "
+             "evidence, for the retrieval harness to score.",
+    )
+    ap.add_argument(
+        "--source", type=Path, default=BENCH / "codemem_dataset.json",
+        help="Dataset --emit-paraphrase reads from.",
+    )
+    ap.add_argument(
+        "--run-judge", action="store_true",
+        help="Score the validation set against a real judge (needs OPENROUTER_API_KEY).",
+    )
+    ap.add_argument("--judge-model", default="openai/gpt-5.4-mini")
     args = ap.parse_args()
+
+    # The two actions that are not reports run alone -- one writes a file, the
+    # other spends money, and neither belongs in the default sweep.
+    if args.emit_paraphrase is not None:
+        result = emit_paraphrase(args.source, args.emit_paraphrase)
+        if args.output:
+            args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    if args.run_judge:
+        result = run_judge(args.judge_model)
+        if args.output:
+            args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False))
+        return
 
     run_all = args.all or not any(
         (args.overlap, args.power, args.judge_validation, args.baselines,

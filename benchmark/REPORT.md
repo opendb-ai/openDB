@@ -361,46 +361,126 @@ natural developer↔agent transcript.
 | multi-session | answer requires combining facts from 2+ sessions |
 | abstention | info not in memory — the agent must decline (anti-hallucination) |
 
-### Retrieval — Recall@K (gate-fix optimized)
+> **n = 27.** Every figure below rests on 27 questions, and per-category figures
+> on 3 to 6. At that size a 95% interval spans roughly 18 points, so these
+> numbers place the system in a range; they do not resolve differences of a few
+> points. Pinning a ~95% accuracy to ±2pp needs n = 457. Run
+> `python codemem_hard.py --power` to print the interval beside any score.
 
-| | R@1 | R@3 | R@5 | R@10 | Median recall |
+### Retrieval — Recall@K
+
+Per-question mode, ~17 real distractor sessions per question. Unlike the
+LongMemEval oracle harness (Part 3), the haystack here is **not** the gold set,
+so R@K can fail — and when the question stops sharing wording with the evidence,
+it does.
+
+| Questions | R@1 | R@3 | R@5 | R@10 | Median recall |
 |---|:-:|:-:|:-:|:-:|:-:|
-| **OpenDB (FTS5)** | 95.8% | **100%** | **100%** | **100%** | **0.8 ms** |
+| as written | **100%** (24/24) | 100% (24/24) | **100%** (24/24) | 100% (24/24) | 0.7 ms |
+| restated | 45.8% (11/24) | 66.7% (16/24) | **75.0%** (18/24) | 79.2% (19/24) | 0.5 ms |
 
-> These per-question-mode figures are subject to the Part 3 caveat: on a
-> distractor-free haystack R@K cannot fail. Use pooled mode (R@5 = 79.1%) for a
-> discriminative retrieval number.
+95% CI on R@5: **[86.2%, 100%]** as written, **[55.1%, 88.0%]** restated.
 
-The correct evidence session is in the top-5 for **every** non-abstention question.
+Both rows run against the identical corpus, identical gold sessions and identical
+dates. **Only the question wording differs**, so the 25-point R@5 gap — and the
+54-point R@1 gap — is attributable to wording and nothing else.
+
+The cause is measurable: across the 24 questions that have evidence, a mean
+**53.4%** of question tokens appear verbatim in the fact being asked about. The
+restated set drives that to **0.0%**, and a pure inverted index has correspondingly
+less to match on. One question (`arch_event_bus`, "How do our components talk to
+each other asynchronously?") returns **zero** results — the same failure mode as
+the `CreateInvoice` tokenization bug fixed elsewhere in this release, but arising
+from vocabulary mismatch rather than tokenization.
+
+The as-written row is the honest number for an agent that phrases a question the
+way the codebase does — which is common, since identifiers are shared vocabulary.
+The restated row is the honest number for one that does not. **Quote both.**
+
+> Reproduce:
+> `python codemem_hard.py --emit-paraphrase` then
+> `python longmemeval_bench.py --data codemem_dataset.json` and
+> `python longmemeval_bench.py --data codemem_paraphrase.json`
 
 ### End-to-End Accuracy
 
 Same store→recall→generate→judge pipeline as LongMemEval. Two readers, to separate
-retrieval quality from reader quality:
+retrieval quality from reader quality. Counts, not rates, for the per-category
+cells — at n = 3 to 6 a percentage implies a precision the data does not have:
 
-| Reader model | Overall | arch | conv | api | bug | loc | abstention | knowledge-update | multi-session |
+| Reader model | Overall | 95% CI | arch | conv | api | bug | loc | ku | multi |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
-| gpt-5.4-mini (cheap) | **92.6%** (25/27) | 100% | 100% | 100% | 100% | 100% | 100% | 75% | 66.7% |
-| **gpt-5.5** | **96.3%** (26/27) | 100% | 100% | 100% | 100% | 100% | 100% | **100%** | 66.7% |
+| gpt-5.4-mini (cheap) | **92.6%** (25/27) | [76.6%, 97.9%] | 6/6 | 4/4 | 3/3 | 3/3 | 4/4 | 3/4 | 2/3 |
+| **gpt-5.5** | **96.3%** (26/27) | [81.7%, 99.3%] | 6/6 | 4/4 | 3/3 | 3/3 | 4/4 | 4/4 | 2/3 |
 
-Even with a **cheap** reader OpenDB clears 92.6%; with a frontier-class reader it
-hits 96.3%, ahead of OMEGA's 95.4% LongMemEval mark (different benchmark, shown for
-scale). Both run on **zero embeddings and zero vector DB**; recall is 0.8 ms on
-a few-hundred-memory store and 7.5 ms median on the pooled 882-session corpus.
+The three abstention questions are typed by subject rather than broken out, so
+they sit inside the `arch` (2) and `loc` (1) columns; an `abstention` column
+alongside these would double-count them. Both readers get 3/3 on them.
 
-Misses are **reader** limitations, not retrieval — Recall@5 is 100%, so the right
-memory was always in context. The lone gpt-5.5 miss is a 2-session synthesis where
-the reader surfaced one of the two required facts. Crucially, **abstention is 100%**
-on both readers: the agent never fabricated a Redis version, a frontend framework,
-or a secret location that wasn't in memory.
+The two intervals overlap across almost their entire width. **This benchmark
+cannot tell these two readers apart**, and the 3.7-point gap between them should
+not be read as one. Both run on zero embeddings and zero vector DB; recall is
+0.7 ms median against this benchmark's 18-session haystack, and 7.5 ms median on
+the pooled 882-session LongMemEval corpus — quote the latency with the corpus
+size it was measured at.
 
-### Why this is OpenDB's home turf
+Misses on the as-written questions are **reader** limitations rather than
+retrieval, since R@5 is 100% there and the right memory was always in context.
+That reasoning does not carry to the restated questions, where retrieval misses
+25% outright — an E2E run on the restated split has not been done, and the reader
+figures above should not be assumed to hold on it. The lone gpt-5.5 miss is
+`ms_oncall`, a 2-session synthesis where the reader surfaced one of the two
+required facts; gpt-5.4-mini misses that one plus `ku_default_branch`. Neither
+reader fabricated a Redis version, a frontend framework, or a secret location
+that wasn't in memory.
+
+### ⚠️ The judge is unvalidated
+
+Both accuracy figures above come from an LLM judge that shares a model family
+with the reader it grades, and **nothing has yet measured how often that judge
+accepts a wrong answer**. Until it has, treat both as upper bounds.
+
+`codemem_hard.py` now carries the validation set — 10 hand-written wrong answers
+that are plausible, specific and false ("right reasoning, wrong engine"; "wrong
+number, everything else right"), plus 7 correct answers restated in different
+words and the 17 gold answers verbatim. Both halves are needed: a judge that
+answers INCORRECT to everything scores a flawless 0% false-accept rate, and only
+the correct-answer controls expose it.
+
+```bash
+python codemem_hard.py --judge-validation                              # inspect the set
+python codemem_hard.py --run-judge --judge-model openai/gpt-5.4-mini   # measure it
+```
+
+`--run-judge` refuses to report a rate if any call errored, because `judge_answer`
+scores a failed call as a rejection — an expired credential would otherwise print
+a perfect 0% false-accept rate. The published results files also do not record
+which judge model produced them; `--run-judge` records its own.
+
+### Baselines
+
+A score with nothing to compare against says nothing about the retriever:
+
+| Strategy | R@5 | |
+|---|:-:|---|
+| random 5 of 18 sessions | 27.6% | chance floor |
+| first 5 sessions | 27.8% | position-only |
+| OpenDB, restated questions | 75.0% | |
+| OpenDB, questions as written | 100% | |
+| oracle | 100% | ceiling |
+
+### Why this is OpenDB's home turf, and where that stops
 
 Coding memory is dominated by *exact identifiers* — `CreateInvoice`, `:9090`,
 `pkg/gateway/middleware/auth.go`, `RFC 7807`, PR numbers. This is precisely where
 lexical FTS beats embedding similarity, and where OpenDB couples memory with
 real file/code reading that conversation-only memory layers (Mem0, Zep, Letta)
 don't have.
+
+The restated split marks the boundary of that argument. When the question carries
+none of the evidence's vocabulary, the identifier advantage does not apply and
+R@1 falls to 45.8%. Semantic retrieval is the standard answer to that case, and
+this benchmark now measures the gap rather than averaging it away.
 
 > Reproduce: `python gen_codemem.py --model gpt-5.5` then
 > `python longmemeval_e2e_bench.py --data codemem_dataset.json --model gpt-5.4-mini --judge-model gpt-5.4-mini`
@@ -496,6 +576,12 @@ python gen_codemem.py --model gpt-5.5
 python longmemeval_bench.py     --data codemem_dataset.json                    # retrieval R@K
 python longmemeval_e2e_bench.py --data codemem_dataset.json \
     --model gpt-5.4-mini --judge-model gpt-5.4-mini                            # E2E
+
+# Part 8 methodology: intervals, overlap, baselines (local only, no API key)
+python codemem_hard.py --all
+python codemem_hard.py --emit-paraphrase                                       # write the hard split
+python longmemeval_bench.py --data codemem_paraphrase.json                     # score it
+python codemem_hard.py --run-judge --judge-model openai/gpt-5.4-mini           # needs a key
 
 # Part 1-2 / 6: FileDB-vs-CMD-vs-RAG and competitor bench (need a running
 # FileDB server and/or embedding endpoint)
