@@ -61,6 +61,58 @@ class TestFusion:
         fuse(cands, weights=RankingWeights())
         assert cands[1]["score"] > cands[0]["score"]
 
+    def test_the_newer_fact_wins_when_the_stale_row_matches_one_more_token(
+        self,
+    ) -> None:
+        """Supersession must survive a moderate lexical deficit.
+
+        2.0.0 shipped `rank_weight_recency = 0.5`, and at that weight this
+        ordering inverted: a superseded fact outranked the one that replaced it
+        whenever the stale row happened to match one extra query token. These
+        are the real numbers from the `conflicting_dates` stress case — a React
+        memory 947 days old whose BM25 is ~2.1x the Svelte memory that
+        superseded it 152 days later.
+        """
+        stale, current = _c(1.0, 946.8), _c(0.4735, 794.8)
+        fuse([stale, current], weights=RankingWeights())
+        assert current["score"] > stale["score"], (
+            f"superseded row won: {stale['score']:.4f} >= {current['score']:.4f}"
+        )
+
+    def test_supersession_has_margin_rather_than_sitting_on_the_threshold(
+        self,
+    ) -> None:
+        """The default must not be one rounding error from flipping back.
+
+        The inversion above happens below a recency weight of ~0.63. Pinning the
+        boundary here means a future weight change that reintroduces the bug
+        fails loudly instead of silently degrading recall for exactly the
+        knowledge-update case this project sells.
+        """
+        def current_wins(recency: float) -> bool:
+            stale, current = _c(1.0, 946.8), _c(0.4735, 794.8)
+            fuse([stale, current], weights=RankingWeights(recency=recency))
+            return current["score"] > stale["score"]
+
+        assert not current_wins(0.60), "expected the documented failure below 0.63"
+        assert current_wins(0.65), "expected the documented fix above 0.63"
+        assert current_wins(RankingWeights().recency), "the shipped default must pass"
+
+    def test_dataclass_defaults_match_the_shipped_settings(self) -> None:
+        """Two independent defaults exist and nothing else forces them to agree.
+
+        `from_settings` reads config, but a bare `RankingWeights()` uses the
+        dataclass default. When 2.0.0's recency weight was raised, changing only
+        config left every bare construction scoring against the old weights.
+        """
+        from opendb_core.config import settings
+
+        defaults = RankingWeights()
+        assert defaults.lexical == settings.rank_weight_lexical
+        assert defaults.recency == settings.rank_weight_recency
+        assert defaults.confidence == settings.rank_weight_confidence
+        assert defaults.k == settings.rank_rrf_k
+
     def test_relevance_still_beats_recency_when_the_gap_is_large(self) -> None:
         """A scorer that always prefers recent is as broken as one that ignores
         time.

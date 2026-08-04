@@ -56,11 +56,24 @@ class Settings(BaseSettings):
     # kept so the two can be compared on the same corpus.
     ranking_mode: str = "rrf"
     rank_weight_lexical: float = 1.0
-    # 0.5, not the 0.25 the grid search preferred. Cross-validation ties the two
-    # on the temporal suite, but 0.25 is not enough to break a lexical near-tie
-    # that BM25 decided on document length alone (see the metadata-date case in
-    # tests/test_sqlite_backend.py). Ties go to the more conservative value.
-    rank_weight_recency: float = 0.5
+    # 0.75, not the 0.25 the grid search preferred and not the 0.5 shipped in
+    # 2.0.0. The temporal suite cannot separate any value in [0.25, 1.5] — every
+    # weight scores an identical 80.0% top-1 with identical per-category
+    # results — so it is not the instrument to pick this with. Two suites that
+    # *can* see the difference both prefer a higher value:
+    #
+    #   weight  stress  conflicting_dates  pooled R@5  CodeMemEval  paraphrased
+    #     0.50   22/23  FAIL                    79.1%         100%        75.0%
+    #     0.75   23/23  PASS                    79.1%         100%        79.2%
+    #
+    # At 0.5 a superseded fact outranked the one that replaced it whenever the
+    # stale row matched one extra query token: lexical ratio-to-best handed the
+    # older row a 0.53 edge and recency returned only 0.42 after weighting. The
+    # flip happens at 0.63; 0.75 leaves margin without reaching 1.0, which would
+    # assert recency and relevance are equally important — a stronger claim than
+    # anything here measures. Nothing regressed at 0.75, including the two cases
+    # the temporal suite already fails (age-spread/car, relevance-wins/port).
+    rank_weight_recency: float = 0.75
     rank_weight_confidence: float = 0.3
     rank_rrf_k: float = 60.0
 
