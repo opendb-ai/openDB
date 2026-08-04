@@ -51,6 +51,19 @@ class Settings(BaseSettings):
     memory_stability_days: float = 30.0  # FSRS stability: days for confidence to drop to 0.9
     memory_confidence_threshold: float = 0.3  # below this, memory fades out of recall
 
+    # Ranking. "rrf" fuses lexical/recency/confidence in rank space; "legacy"
+    # is the original score-space product of BM25 x decay x pin x confidence,
+    # kept so the two can be compared on the same corpus.
+    ranking_mode: str = "rrf"
+    rank_weight_lexical: float = 1.0
+    # 0.5, not the 0.25 the grid search preferred. Cross-validation ties the two
+    # on the temporal suite, but 0.25 is not enough to break a lexical near-tie
+    # that BM25 decided on document length alone (see the metadata-date case in
+    # tests/test_sqlite_backend.py). Ties go to the more conservative value.
+    rank_weight_recency: float = 0.5
+    rank_weight_confidence: float = 0.3
+    rank_rrf_k: float = 60.0
+
     # Evaluation capture (opt-in): records real search/recall traffic for offline analysis
     eval_capture_enabled: bool = False
 

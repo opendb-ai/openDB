@@ -10,6 +10,7 @@ import json
 import logging
 import re
 
+from opendb_core.storage.ranking import RankingWeights, fuse
 from opendb_core.storage.shared import (
     build_highlight,
     compute_confidence,
@@ -334,6 +335,7 @@ class SQLiteMemoryMixin:
         limit: int,
         offset: int,
         pinned_only: bool = False,
+        explain: bool = False,
     ) -> dict:
         # Fast path: return all pinned memories without FTS search
         if pinned_only:
@@ -472,8 +474,14 @@ class SQLiteMemoryMixin:
                 or passes_memory_query_gate(query, str(s["content"]))
             ]
 
-        # Recency tiebreaker: when FTS scores cluster, boost newer memories
-        if len(scored) >= 2:
+        # Fuse the signals. In rrf mode this replaces the score-space product
+        # (BM25 x decay x pin x confidence) and the 0.7-cluster/1-day recency
+        # bonus that followed it — see storage/ranking.py for why multiplying a
+        # raw BM25 value by a decay factor is not a defensible combination.
+        if settings.ranking_mode == "rrf":
+            fuse(scored, weights=RankingWeights.from_settings(settings),
+                 recency_intent=recency)
+        elif len(scored) >= 2:
             max_score = max(s["score"] for s in scored)
             if max_score > 0:
                 for s in scored:
@@ -483,10 +491,14 @@ class SQLiteMemoryMixin:
                         s["score"] = s["score"] * recency_bonus
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        # Strip internal field and round final scores before returning
+        # Strip internal fields and round final scores before returning
         for s in scored:
             s.pop("_age_days", None)
             s.pop("_fts", None)
+            if not explain:
+                s.pop("_explain", None)
+            elif "_explain" in s:
+                s["explain"] = s.pop("_explain")
             s["score"] = float(f"{s['score']:.6g}")
         results = scored[offset : offset + limit]
 

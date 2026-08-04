@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 
+from opendb_core.storage.ranking import RankingWeights, fuse
 from opendb_core.storage.shared import (
     VALID_MEMORY_TYPES,
     build_pg_or_tsquery,
@@ -239,6 +240,7 @@ class PgMemoryMixin:
         limit: int,
         offset: int,
         pinned_only: bool = False,
+        explain: bool = False,
     ) -> dict:
         from opendb_core.database import get_pool
         from opendb_core.storage.shared import pg_memory_row as _pg_memory_row
@@ -420,8 +422,11 @@ class PgMemoryMixin:
                 or passes_memory_query_gate(query, str(s["content"]))
             ]
 
-        # Recency tiebreaker
-        if len(scored) >= 2:
+        # Same fusion as SQLite — a backend must not have its own ranking.
+        if settings.ranking_mode == "rrf":
+            fuse(scored, weights=RankingWeights.from_settings(settings),
+                 recency_intent=recency)
+        elif len(scored) >= 2:
             max_score = max(s["score"] for s in scored)
             if max_score > 0:
                 for s in scored:
@@ -433,6 +438,10 @@ class PgMemoryMixin:
         for s in scored:
             s.pop("_age_days", None)
             s.pop("_fts", None)
+            if not explain:
+                s.pop("_explain", None)
+            elif "_explain" in s:
+                s["explain"] = s.pop("_explain")
             s["score"] = float(f"{s['score']:.6g}")
         results = scored[offset : offset + limit]
 
