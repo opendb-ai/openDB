@@ -105,40 +105,74 @@ T4 (cross-reference) is the most expensive task for both. RAG uses 94k tokens an
 
 ## Part 3: LongMemEval — Memory Retrieval (R@K)
 
-> OpenDB memory pipeline evaluated on the LongMemEval benchmark (Wang et al., ICLR 2025). 470 questions (abstention questions excluded), 6 question types. Measures session-level Recall@K.
+> OpenDB memory pipeline evaluated on LongMemEval (Wang et al., ICLR 2025).
+> 470 questions (abstention excluded), 6 question types, session-level Recall@K.
 
-### Retrieval Recall
+### The instrument matters more than the number
 
-| Metric | OpenDB |
+`longmemeval_bench.py` has two modes, and they measure different things.
+
+**Per-question mode (default).** Each question gets its own empty database
+holding only that question's haystack. On `longmemeval_oracle.json` that is not
+a retrieval task:
+
+```
+questions: 500
+haystack sessions per question: mean=1.896  median=2  min=1  max=6
+haystack == gold exactly    : 500/500 (100.0%)
+distractor sessions         : 0 across all 500 questions
+=> R@5 arithmetically guaranteed for 497/500
+```
+
+With ~2 candidates and 5 slots, the retriever cannot miss. **Earlier revisions
+of this report published 100% R@1/R@3/R@5/R@10 from this mode. Those figures
+described the harness, not the retriever, and are withdrawn.** The mode is
+retained for latency measurement and for datasets that carry real distractors
+(CodeMemEval does: ~17 per question), and it now prints a warning when the
+dataset has none.
+
+**Pooled mode (`--pooled`) — quote this one.** Every question's sessions are
+indexed into a single store, so each query competes against the other questions'
+sessions as distractors.
+
+| Metric | OpenDB (pooled, 882 sessions) |
 |--------|--------|
-| **R@1** | **100% (470/470)** |
-| **R@3** | **100% (470/470)** |
-| **R@5** | **100% (470/470)** |
-| **R@10** | **100% (470/470)** |
-| Median recall latency | **1.1ms** |
-| p95 recall latency | 2.1ms |
+| **R@1** | 52.1% (245/470) |
+| **R@3** | 70.4% (331/470) |
+| **R@5** | **79.1% (372/470)** |
+| **R@10** | 86.4% (406/470) |
+| Median recall latency | 7.5 ms |
+| Mean / p95 recall latency | 9.6 ms / 22.5 ms |
 
-### R@5 by Question Type
+Distractors per question: ~880.
+
+### R@5 by Question Type (pooled)
 
 | Category | Count | R@5 |
 |----------|-------|-----|
-| knowledge-update | 72 | **100%** |
-| multi-session | 121 | **100%** |
-| single-session-assistant | 56 | **100%** |
-| single-session-preference | 30 | **100%** |
-| single-session-user | 64 | **100%** |
-| temporal-reasoning | 127 | **100%** |
+| single-session-assistant | 56 | 100.0% |
+| knowledge-update | 72 | 93.1% |
+| multi-session | 121 | 77.7% |
+| single-session-user | 64 | 76.6% |
+| temporal-reasoning | 127 | 76.4% |
+| **single-session-preference** | 30 | **30.0%** |
 
-> Run: `python longmemeval_bench.py` — completes in ~4s, no API key needed.
+This spread is the lexical thesis showing its actual shape. Assistant-authored
+and knowledge-update questions restate the evidence's own vocabulary, and FTS
+handles them. Preference questions are the paraphrase case — shared intent, few
+shared tokens — and 30% is where a pure inverted index runs out. That is the
+gap an opt-in dense or learned-sparse tier would target, and it is now
+measurable, which it was not before.
 
-**Rank-aware recall fix (2026-06):** these 100% figures are *reproduced* on the
-current code. Before the fix, R@5 was 96.6% (16 misses). Every miss was the same
-failure mode: the correct evidence session was the **#1 FTS hit**, but a
-token-overlap "query gate" discarded it because the question and the stored answer
-shared fewer than two words. The gate is now rank-aware — it never drops a strong
-lexical match and only filters the weak tail — lifting R@1/R@3/R@5/R@10 to 100%
-with no latency cost. Regression test: `tests/test_memory_render.py::
-test_strong_fts_match_survives_query_gate_low_overlap`.
+> Run: `python longmemeval_bench.py --pooled` — ~30s, no API key needed.
+
+**On the "rank-aware recall fix" (2026-06):** the fix itself is sound — a
+token-overlap gate was discarding evidence that was the #1 FTS hit whenever the
+question and the stored answer shared fewer than two words, and the gate is now
+rank-aware. But it was validated against the distractor-free harness, where the
+before/after numbers (96.6% -> 100%) had no room to discriminate. Its value
+should be re-established against pooled mode. Regression test:
+`tests/test_memory_render.py::test_strong_fts_match_survives_query_gate_low_overlap`.
 
 ---
 
@@ -169,7 +203,7 @@ test_strong_fts_match_survives_query_gate_low_overlap`.
 > **78.8% → 84.8%** — a clean +6.0 from retrieval alone, with the biggest gains
 > exactly where recall was being silently dropped: multi-session 62.4→72.9%,
 > temporal-reasoning 75.2→82.7%, preference 63.3→76.7%. The reader model is the
-> remaining ceiling, not retrieval (R@5 is 100%). On the same optimized code a
+> remaining ceiling, not retrieval (retrieval cannot fail in this harness — see Part 3). On the same optimized code a
 > stronger local reader (gpt-5.5) scores **89.8%** (449/500) — temporal 93.2%,
 > knowledge-update 94.9%, single-session 97–100%. Saved run:
 > `benchmark_longmemeval_e2e_gpt55.json`.
@@ -198,7 +232,7 @@ test_strong_fts_match_survives_query_gate_low_overlap`.
 ### Key Differentiators
 
 - **Zero API cost for retrieval**: OpenDB uses SQLite FTS5, no embedding API calls needed
-- **Sub-millisecond latency**: 1.3ms median recall vs 50-200ms for vector approaches
+- **Low latency**: 1.3ms median recall on small stores, 7.5ms at 882 sessions, vs 50-200ms for vector approaches
 - **No infrastructure**: Single SQLite file vs vector DB + embedding model + graph DB
 - **Abstention via FTS**: If query keywords don't match any memory, FTS returns empty — a natural abstention signal (86.7% accuracy)
 - **Temporal reasoning**: 95.5% — beats all competitors including OMEGA (94%) despite using a cheaper model and no embeddings
@@ -333,6 +367,10 @@ natural developer↔agent transcript.
 |---|:-:|:-:|:-:|:-:|:-:|
 | **OpenDB (FTS5)** | 95.8% | **100%** | **100%** | **100%** | **0.8 ms** |
 
+> These per-question-mode figures are subject to the Part 3 caveat: on a
+> distractor-free haystack R@K cannot fail. Use pooled mode (R@5 = 79.1%) for a
+> discriminative retrieval number.
+
 The correct evidence session is in the top-5 for **every** non-abstention question.
 
 ### End-to-End Accuracy
@@ -347,7 +385,8 @@ retrieval quality from reader quality:
 
 Even with a **cheap** reader OpenDB clears 92.6%; with a frontier-class reader it
 hits 96.3%, ahead of OMEGA's 95.4% LongMemEval mark (different benchmark, shown for
-scale). Both run on **zero embeddings, zero vector DB, 0.8 ms recall**.
+scale). Both run on **zero embeddings and zero vector DB**; recall is 0.8 ms on
+a few-hundred-memory store and 7.5 ms median on the pooled 882-session corpus.
 
 Misses are **reader** limitations, not retrieval — Recall@5 is 100%, so the right
 memory was always in context. The lone gpt-5.5 miss is a 2-session synthesis where

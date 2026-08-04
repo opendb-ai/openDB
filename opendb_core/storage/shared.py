@@ -84,6 +84,84 @@ def jaccard_similarity(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
+# Explicit calendar dates: 2026-03-02, 2026/03/02, 03/02/2026, "March 2 2026".
+_DATE_RE = re.compile(
+    r"\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}"
+    r"|\d{1,2}[-/]\d{1,2}[-/]\d{4}"
+    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+\d{4})\b",
+    re.IGNORECASE,
+)
+
+
+# Phrases that signal the content corrects a previous fact. Shared by both
+# backends so "does this supersede?" cannot answer differently per backend.
+UPDATE_SIGNALS = re.compile(
+    r"\b(moved to|changed|switched|updated|no longer|"
+    r"instead of|replaced|now (?:use|live|work|prefer)|"
+    r"grew to|new role|started a new|"
+    r"changed it from|switched to|migrated)\b",
+    re.IGNORECASE,
+)
+
+# Jaccard overlap required before one memory supersedes another.
+# With an explicit update phrase the author is telling us it is a correction,
+# so modest overlap suffices. Without one, only a near-duplicate should
+# supersede: distinct facts about a shared subject routinely reach 0.4-0.6.
+SIGNALED_THRESHOLD = 0.15
+UNSIGNALED_THRESHOLD = 0.65
+
+VALID_MEMORY_TYPES = frozenset({"episodic", "semantic", "procedural"})
+
+
+def supersede_threshold(content: str, base: float = 0.3) -> float:
+    """Overlap a candidate must reach before *content* may replace it."""
+    if UPDATE_SIGNALS.search(content):
+        return min(base, SIGNALED_THRESHOLD)
+    return max(base, UNSIGNALED_THRESHOLD)
+
+
+def build_pg_or_tsquery(query: str) -> str:
+    """Render *query* as an OR-joined ``to_tsquery`` expression.
+
+    The two backends disagreed on the most basic thing a query can mean.
+    SQLite ORs its terms (``escape_fts5(use_or=True)``), while PostgreSQL used
+    ``plainto_tsquery``, which ANDs every lexeme — so the same query against the
+    same data returned different result sets, and only SQLite was ever
+    benchmarked. This produces the OR semantics for PostgreSQL.
+
+    Tokens are reduced to alphanumerics before being joined, so no caller input
+    can reach ``to_tsquery``'s parser as syntax (``&``, ``|``, ``!``, ``<->``,
+    parentheses) or make it raise on malformed input.
+    """
+    raw = [re.sub(r"[^\w]", "", t) for t in query.split()]
+    terms = [t for t in raw if t and t.lower() not in STOPWORDS]
+    if not terms:
+        terms = [t for t in raw if t]
+    if not terms:
+        return ""
+    # ':*' gives prefix matching, mirroring the suffix-stripped prefix terms
+    # escape_fts5 emits on the SQLite side.
+    return " | ".join(f"{t}:*" for t in terms)
+
+
+def extract_dates(text: str) -> set[str]:
+    """Explicit calendar dates mentioned in *text*, normalized for comparison."""
+    return {m.group(0).lower().replace("/", "-") for m in _DATE_RE.finditer(text)}
+
+
+def describes_distinct_events(a: str, b: str) -> bool:
+    """Whether two contents are dated records of *different* events.
+
+    Two sentences that each carry an explicit — and different — date are event
+    records, not competing versions of one fact. "On 2026-01-10 we fixed a
+    deadlock in the connection pool" and "On 2026-02-14 we fixed a memory leak
+    in the connection pool" share most of their tokens, so pure lexical overlap
+    read them as a knowledge update and destroyed the older one.
+    """
+    dates_a, dates_b = extract_dates(a), extract_dates(b)
+    return bool(dates_a and dates_b and not (dates_a & dates_b))
+
+
 # ---------------------------------------------------------------------------
 # Temporal scoring
 # ---------------------------------------------------------------------------

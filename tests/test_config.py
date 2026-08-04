@@ -7,8 +7,11 @@ from opendb_core.config import Settings
 
 class TestSettingsDefaults:
     def test_default_backend(self) -> None:
+        # The embedded backend is what `pip install open-db` ships and what
+        # every quickstart assumes; defaulting to postgres pointed the
+        # documented three-line install at a server nobody was told to run.
         s = Settings()
-        assert s.backend == "postgres"
+        assert s.backend == "sqlite"
 
     def test_default_max_file_size(self) -> None:
         s = Settings()
@@ -19,8 +22,10 @@ class TestSettingsDefaults:
         assert s.port == 8000
 
     def test_default_host(self) -> None:
+        # Loopback by default. Binding 0.0.0.0 with auth unenforced exposed the
+        # whole workspace to the local network.
         s = Settings()
-        assert s.host == "0.0.0.0"
+        assert s.host == "127.0.0.1"
 
     def test_default_ocr_enabled(self) -> None:
         s = Settings()
@@ -47,8 +52,15 @@ class TestSettingsDefaults:
         assert s.index_max_concurrent == 4
 
     def test_default_cors_origins(self) -> None:
+        # No cross-origin by default: with "*" any web page the developer
+        # visited could script the local OpenDB server.
         s = Settings()
-        assert "*" in s.cors_origins
+        assert s.cors_origins == []
+
+    def test_vision_egress_is_opt_in(self) -> None:
+        # Enabling vision POSTs indexed image bytes to a third-party API.
+        s = Settings()
+        assert s.vision_enabled is False
 
     def test_file_storage_path_is_path(self) -> None:
         s = Settings()

@@ -131,10 +131,11 @@ def create_tools(client: OpenDBClient, ToolBase: type, ResultClass: type) -> lis
         async def execute(self, args: dict[str, Any], ctx: Any) -> Any:
             file_path = args["file_path"]
 
-            # Workspace validation
-            file_path = _resolve_workspace(file_path, ctx)
-            if isinstance(file_path, ResultClass):
-                return file_path  # Error result
+            # Workspace confinement — refuse to read outside the workspace.
+            try:
+                file_path = _resolve_workspace(file_path, ctx)
+            except WorkspaceViolation as exc:
+                return ResultClass(error=str(exc))
 
             offset = max(1, args.get("offset", 1))
             limit = args.get("limit", 2000)
@@ -242,10 +243,11 @@ def create_tools(client: OpenDBClient, ToolBase: type, ResultClass: type) -> lis
             if workspace and search_path == ".":
                 search_path = workspace
 
-            # Workspace validation
-            search_path = _resolve_workspace(search_path, ctx)
-            if isinstance(search_path, ResultClass):
-                return search_path
+            # Workspace confinement — refuse to search outside the workspace.
+            try:
+                search_path = _resolve_workspace(search_path, ctx)
+            except WorkspaceViolation as exc:
+                return ResultClass(error=str(exc))
 
             file_glob = args.get("glob")
             case_insensitive = args.get("case_insensitive", False)
@@ -313,9 +315,10 @@ def create_tools(client: OpenDBClient, ToolBase: type, ResultClass: type) -> lis
             if workspace and search_dir == ".":
                 search_dir = workspace
 
-            search_dir = _resolve_workspace(search_dir, ctx)
-            if isinstance(search_dir, ResultClass):
-                return search_dir
+            try:
+                search_dir = _resolve_workspace(search_dir, ctx)
+            except WorkspaceViolation as exc:
+                return ResultClass(error=str(exc))
 
             # Try OpenDB
             data = await client.glob_files(pattern=pattern, path=search_dir)
@@ -342,19 +345,29 @@ def create_tools(client: OpenDBClient, ToolBase: type, ResultClass: type) -> lis
 # Shared helpers (no host-app imports)
 # ======================================================================
 
+class WorkspaceViolation(ValueError):
+    """Raised when a caller-supplied path escapes the configured workspace."""
+
+
 def _resolve_workspace(file_path: str, ctx: Any) -> str:
-    """Resolve and validate path against workspace. Returns error ResultClass on violation."""
+    """Resolve *file_path* and confine it to the workspace root.
+
+    This used to compute ``resolved.relative_to(ws)``, swallow the ValueError,
+    and return the resolved path anyway — the only confinement check in the
+    codebase was a no-op, so ``../../../etc/passwd`` or any absolute path was
+    read straight back to the agent. ``Path.resolve()`` also follows symlinks,
+    so the containment test is applied to the fully resolved target.
+    """
+    resolved = Path(file_path).resolve()
     workspace = getattr(ctx, "workspace", None)
     if not workspace:
-        return str(Path(file_path).resolve())
-    resolved = Path(file_path).resolve()
+        return str(resolved)
     ws = Path(workspace).resolve()
-    try:
-        resolved.relative_to(ws)
-    except ValueError:
-        # Can't return ResultClass here since we don't have it in scope.
-        # Instead we return the string — caller checks isinstance.
-        pass
+    if resolved != ws and ws not in resolved.parents:
+        raise WorkspaceViolation(
+            f"Path escapes the workspace: {file_path!r} resolves to {resolved} "
+            f"which is outside {ws}"
+        )
     return str(resolved)
 
 

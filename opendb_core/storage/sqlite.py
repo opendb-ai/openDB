@@ -26,8 +26,15 @@ from opendb_core.storage.shared import (
     sqlite_file_row,
 )
 from opendb_core.storage._sqlite_memory import SQLiteMemoryMixin
+from opendb_core.storage._sqlite_txn import SQLiteTxnMixin, apply_connection_pragmas
 
 logger = logging.getLogger(__name__)
+
+# Weight of the derived `expansion` FTS column relative to the literal body.
+# Low enough that a document matching only through an identifier split always
+# ranks below one that contains the query terms verbatim.
+_EXPANSION_WEIGHT = 0.35
+_PAGES_BM25 = f"bm25(pages_fts, 1.0, {_EXPANSION_WEIGHT})"
 
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -79,7 +86,11 @@ CREATE TABLE IF NOT EXISTS pages (
 
 CREATE INDEX IF NOT EXISTS idx_pages_file ON pages(file_id, page_number);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(text);
+-- Two columns: `text` is the literal (tokenized) body, `expansion` holds
+-- derived forms — today the space-separated split of camelCase identifiers.
+-- Queries weight `expansion` down (see _FTS_WEIGHTS) so a derived match can
+-- never outrank a literal one.
+CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(text, expansion);
 
 CREATE TRIGGER IF NOT EXISTS files_updated AFTER UPDATE ON files
     WHEN old.updated_at = new.updated_at
@@ -94,7 +105,8 @@ CREATE TABLE IF NOT EXISTS memories (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     memory_id     TEXT NOT NULL UNIQUE,
     content       TEXT NOT NULL,
-    memory_type   TEXT NOT NULL DEFAULT 'semantic',
+    memory_type   TEXT NOT NULL DEFAULT 'semantic'
+                  CHECK (memory_type IN ('episodic', 'semantic', 'procedural')),
     pinned        INTEGER NOT NULL DEFAULT 0,
     source        TEXT NOT NULL DEFAULT 'unknown',
     superseded_id TEXT DEFAULT NULL,
@@ -110,13 +122,53 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content);
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, expansion);
 
-CREATE TRIGGER IF NOT EXISTS memories_updated AFTER UPDATE ON memories
-    WHEN old.updated_at = new.updated_at
-BEGIN
-    UPDATE memories SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = new.id;
-END;
+-- Append-only history of superseded memory content.
+--
+-- Supersede used to be an in-place `UPDATE memories SET content = ?`, which
+-- destroyed the prior fact outright and left `superseded_id` pointing at a row
+-- that no longer existed. Every version is now retained here, so
+-- `memory_history()` can answer "what did this say before?" and a wrong
+-- supersede is recoverable instead of terminal.
+CREATE TABLE IF NOT EXISTS memory_revisions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id      TEXT NOT NULL,
+    content        TEXT NOT NULL,
+    memory_type    TEXT NOT NULL,
+    tags           TEXT NOT NULL DEFAULT '[]',
+    metadata       TEXT NOT NULL DEFAULT '{}',
+    source         TEXT NOT NULL DEFAULT 'unknown',
+    superseded_by  TEXT,
+    valid_from     TEXT NOT NULL,
+    valid_to       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    recorded_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_revisions_mid
+    ON memory_revisions(memory_id, valid_to DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_revisions_by
+    ON memory_revisions(superseded_by);
+
+-- NOTE: there is deliberately no `memories_updated` trigger.
+--
+-- One used to exist with `WHEN old.updated_at = new.updated_at`, which meant
+-- *any* UPDATE that did not name `updated_at` silently reset it to now(). The
+-- recall path's reinforcement UPDATE did exactly that, and `updated_at` is the
+-- column the time-decay ranking reads — so reading a memory reset its age to
+-- zero and a stale fact would outrank a fresh one. `updated_at` is now set
+-- explicitly by the code paths that genuinely modify a fact.
+
+-- Small key/value table for durable facts about the index itself.
+-- `tokenizer_fingerprint` is what lets `opendb doctor` detect that text was
+-- indexed under different tokenization rules than the ones now in effect —
+-- previously that skew was undetectable and presented only as silently
+-- degraded recall.
+CREATE TABLE IF NOT EXISTS opendb_meta (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
 
 -- -----------------------------------------------------------------
 -- Eval capture (opt-in)
@@ -199,7 +251,7 @@ END;
 """
 
 
-class SQLiteBackend(SQLiteMemoryMixin):
+class SQLiteBackend(SQLiteTxnMixin, SQLiteMemoryMixin):
     """SQLite + FTS5 implementation of StorageBackend.
 
     Usage::
@@ -212,7 +264,8 @@ class SQLiteBackend(SQLiteMemoryMixin):
 
     def __init__(self, db_path: str | Path) -> None:
         self._db_path = Path(db_path)
-        self._db = None  # aiosqlite.Connection
+        self._db = None   # reader connection (aiosqlite.Connection)
+        self._wdb = None  # writer connection — only ever used inside write_txn()
         self._write_lock = asyncio.Lock()
 
     async def init(self) -> None:
@@ -225,93 +278,66 @@ class SQLiteBackend(SQLiteMemoryMixin):
             )
 
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Two connections. Readers get a stable WAL snapshot and can therefore
+        # never observe a writer's uncommitted rows — with a single shared
+        # connection, a SELECT issued while another coroutine held an open
+        # transaction ran *inside* that transaction and could return values
+        # that were later rolled back.
         self._db = await aiosqlite.connect(str(self._db_path), isolation_level=None)
         self._db.row_factory = aiosqlite.Row
-        await self._migrate_fts_if_needed()
-        await self._db.executescript(_SCHEMA)
-        await self._migrate_memories_pinned()
-        await self._migrate_memories_v2()
-        await self._backfill_code_symbols_if_needed()
-        await self._db.commit()
+        self._wdb = await aiosqlite.connect(str(self._db_path), isolation_level=None)
+        self._wdb.row_factory = aiosqlite.Row
+
+        await apply_connection_pragmas(self._wdb)
+        await apply_connection_pragmas(self._db)
+
+        # DDL is idempotent (IF NOT EXISTS) and executescript() implies COMMIT,
+        # so it runs outside write_txn().
+        await self._wdb.executescript(_SCHEMA)
+        await self._run_migrations()
+
         logger.info("SQLite backend initialised at %s", self._db_path)
 
-    async def _migrate_fts_if_needed(self) -> None:
-        """Migrate old content-table FTS5 to standalone + jieba tokenization."""
-        try:
-            async with self._db.execute(
-                "SELECT sql FROM sqlite_master WHERE name = 'pages_fts'"
-            ) as cur:
-                row = await cur.fetchone()
-            if not row:
-                return  # Fresh DB, no migration needed
-            create_sql = row[0] or ""
-            if "content=" not in create_sql:
-                return  # Already standalone
-            logger.info("Migrating pages_fts to standalone FTS5 with jieba tokenization...")
-            # Drop old triggers and FTS table
-            await self._db.execute("DROP TRIGGER IF EXISTS pages_ai")
-            await self._db.execute("DROP TRIGGER IF EXISTS pages_ad")
-            await self._db.execute("DROP TRIGGER IF EXISTS pages_au")
-            await self._db.execute("DROP TABLE IF EXISTS pages_fts")
-            # Recreate as standalone
-            await self._db.execute(
-                "CREATE VIRTUAL TABLE pages_fts USING fts5(text)"
-            )
-            # Re-populate with tokenized text
-            from opendb_core.utils.tokenizer import tokenize_for_fts
-            async with self._db.execute(
-                "SELECT id, text FROM pages ORDER BY id"
-            ) as cur:
-                rows = await cur.fetchall()
-            if rows:
-                fts_rows = [(r["id"], tokenize_for_fts(r["text"])) for r in rows]
-                await self._db.executemany(
-                    "INSERT INTO pages_fts(rowid, text) VALUES (?, ?)",
-                    fts_rows,
-                )
-            await self._db.commit()
-            logger.info("FTS migration complete — %d pages re-indexed.", len(rows) if rows else 0)
-        except (aiosqlite.OperationalError, aiosqlite.DatabaseError):
-            # If pages table doesn't exist yet (fresh DB), skip
-            pass
+    # ------------------------------------------------------------------
+    # Schema versioning
+    # ------------------------------------------------------------------
 
-    async def _migrate_memories_pinned(self) -> None:
-        """Add 'pinned' column to memories table if missing (v1.1 migration)."""
-        try:
-            async with self._db.execute("PRAGMA table_info(memories)") as cur:
-                cols = {row[1] for row in await cur.fetchall()}
-            if "pinned" not in cols and "memory_id" in cols:
-                await self._db.execute(
-                    "ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"
-                )
-                logger.info("Added 'pinned' column to memories table.")
-        except (aiosqlite.OperationalError, aiosqlite.DatabaseError):
-            pass
+    async def _user_version(self) -> int:
+        async with self._wdb.execute("PRAGMA user_version") as cur:
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
-    async def _migrate_memories_v2(self) -> None:
-        """Add provenance + confidence columns (v1.6 migration)."""
-        try:
-            async with self._db.execute("PRAGMA table_info(memories)") as cur:
-                cols = {row[1] for row in await cur.fetchall()}
-            if "memory_id" not in cols:
-                return  # memories table doesn't exist yet
-            for col, ddl in [
-                ("source", "ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"),
-                ("superseded_id", "ALTER TABLE memories ADD COLUMN superseded_id TEXT DEFAULT NULL"),
-                ("confidence", "ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0"),
-                ("last_accessed", "ALTER TABLE memories ADD COLUMN last_accessed TEXT DEFAULT NULL"),
-                ("access_count", "ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0"),
-            ]:
-                if col not in cols:
-                    await self._db.execute(ddl)
-                    logger.info("Added '%s' column to memories table.", col)
-        except (aiosqlite.OperationalError, aiosqlite.DatabaseError):
-            pass
+    async def _run_migrations(self) -> None:
+        """Apply forward migrations, each atomically with its version bump.
+
+        ``PRAGMA user_version`` is the single source of truth. Previously,
+        migrations were ``PRAGMA table_info`` sniffing wrapped in
+        ``except (OperationalError, DatabaseError): pass`` — a failed migration
+        was indistinguishable from a completed one, and expensive backfills
+        re-ran on every single ``init()``.
+        """
+        current = await self._user_version()
+        for version, name, step in _MIGRATIONS:
+            if current >= version:
+                continue
+            logger.info("Applying SQLite migration %d (%s)", version, name)
+            async with self.write_txn() as conn:
+                await step(self, conn)
+                # Same transaction as the step: user_version is never left
+                # between two states, even if the process is killed mid-way.
+                await conn.execute(f"PRAGMA user_version={version:d}")
+            current = version
 
     async def _backfill_code_symbols_if_needed(self) -> None:
-        """Populate code_symbols for ready code files indexed before this table existed."""
+        """Populate code_symbols for ready code files indexed before this table existed.
+
+        Runs once, as migration step 3 — it used to run on every ``init()``,
+        re-executing an unbounded ``files ⋈ pages`` join and re-parsing every
+        code page on a workspace that had nothing to backfill.
+        """
         try:
-            async with self._db.execute(
+            async with self._wdb.execute(
                 """
                 SELECT
                     f.id AS file_id,
@@ -394,6 +420,9 @@ class SQLiteBackend(SQLiteMemoryMixin):
         if self._db:
             await self._db.close()
             self._db = None
+        if self._wdb:
+            await self._wdb.close()
+            self._wdb = None
 
     # ------------------------------------------------------------------
     # Ingestion
@@ -432,10 +461,47 @@ class SQLiteBackend(SQLiteMemoryMixin):
         toc: str,
         page_line_ranges: list[tuple[int, int]],
     ) -> dict:
-        async with self._write_lock:
-            try:
-                await self._db.execute("BEGIN")
-                await self._db.execute(
+        from opendb_core.config import settings
+        from opendb_core.utils.tokenizer import expand_identifiers, tokenize_for_fts
+        from opendb_core.utils.code_intel import extract_code_intel_from_pages
+        from opendb_core.utils.link_extractor import extract_file_links
+
+        # Pure-CPU work first, outside the transaction: parsing, tokenizing and
+        # symbol extraction are the slowest and most failure-prone part of
+        # ingestion, and holding the write lock across them starved every other
+        # writer for the duration.
+        source_path = merged_metadata.get("source_path") or original_filename
+        symbols, code_links = extract_code_intel_from_pages(
+            parse_result.pages,
+            page_line_ranges,
+            filename=original_filename,
+            source_path=source_path,
+        )
+        links: list[dict] = []
+        if settings.link_extraction_enabled:
+            links = extract_file_links(full_text, source_path=source_path)
+            links.extend(code_links)
+
+        page_rows = [
+            (
+                file_id,
+                page.page_number,
+                page.section_title,
+                page.content_type,
+                page.text,
+                page_line_ranges[i][0],
+                page_line_ranges[i][1],
+            )
+            for i, page in enumerate(parse_result.pages)
+        ]
+
+        try:
+            # write_txn() rolls back on *any* BaseException. The previous
+            # `except aiosqlite.IntegrityError` left the transaction open for
+            # every other error class — a parse or tokenizer failure poisoned
+            # the shared connection and every later write in the process failed.
+            async with self.write_txn() as conn:
+                await conn.execute(
                     """
                     INSERT INTO files
                         (id, filename, mime_type, file_size, file_path,
@@ -454,22 +520,8 @@ class SQLiteBackend(SQLiteMemoryMixin):
                     ),
                 )
 
-                from opendb_core.utils.tokenizer import tokenize_for_fts
-
-                page_rows = [
-                    (
-                        file_id,
-                        page.page_number,
-                        page.section_title,
-                        page.content_type,
-                        page.text,
-                        page_line_ranges[i][0],
-                        page_line_ranges[i][1],
-                    )
-                    for i, page in enumerate(parse_result.pages)
-                ]
                 if page_rows:
-                    await self._db.executemany(
+                    await conn.executemany(
                         """
                         INSERT INTO pages
                             (file_id, page_number, section_title,
@@ -478,22 +530,21 @@ class SQLiteBackend(SQLiteMemoryMixin):
                         """,
                         page_rows,
                     )
-                    # Insert tokenized text into standalone FTS5 index
-                    async with self._db.execute(
+                    async with conn.execute(
                         "SELECT id, text FROM pages WHERE file_id = ? ORDER BY page_number",
                         (file_id,),
                     ) as cur:
                         page_id_rows = await cur.fetchall()
                     fts_rows = [
-                        (r["id"], tokenize_for_fts(r["text"]))
+                        (r["id"], tokenize_for_fts(r["text"]), expand_identifiers(r["text"]))
                         for r in page_id_rows
                     ]
-                    await self._db.executemany(
-                        "INSERT INTO pages_fts(rowid, text) VALUES (?, ?)",
+                    await conn.executemany(
+                        "INSERT INTO pages_fts(rowid, text, expansion) VALUES (?, ?, ?)",
                         fts_rows,
                     )
 
-                await self._db.execute(
+                await conn.execute(
                     """
                     INSERT INTO file_text
                         (file_id, full_text, total_lines, line_index, toc)
@@ -508,38 +559,25 @@ class SQLiteBackend(SQLiteMemoryMixin):
                     ),
                 )
 
-                from opendb_core.config import settings
-                source_path = merged_metadata.get("source_path") or original_filename
-                from opendb_core.utils.code_intel import extract_code_intel_from_pages
-                symbols, code_links = extract_code_intel_from_pages(
-                    parse_result.pages,
-                    page_line_ranges,
-                    filename=original_filename,
-                    source_path=source_path,
-                )
                 await self._replace_code_symbols_unlocked(file_id, symbols)
                 if settings.link_extraction_enabled:
-                    from opendb_core.utils.link_extractor import extract_file_links
-                    links = extract_file_links(full_text, source_path=source_path)
-                    links.extend(code_links)
                     await self._replace_file_links_unlocked(file_id, links)
 
-                await self._db.execute(
-                    "UPDATE files SET status = 'ready', metadata = ? WHERE id = ?",
+                await conn.execute(
+                    "UPDATE files SET status = 'ready', metadata = ?, "
+                    "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
                     (json.dumps(merged_metadata), file_id),
                 )
                 if settings.link_extraction_enabled:
                     await self._reconcile_links_to_file_unlocked(file_id)
-                await self._db.commit()
 
-            except aiosqlite.IntegrityError as exc:
-                await self._db.rollback()
-                # Detect unique-constraint violation (duplicate checksum)
-                if "UNIQUE constraint failed" in str(exc):
-                    dup = await self.check_duplicate(checksum)
-                    if dup:
-                        return dup
-                raise
+        except aiosqlite.IntegrityError as exc:
+            # Duplicate checksum: another worker won the race for this content.
+            if "UNIQUE constraint failed" in str(exc):
+                dup = await self.check_duplicate(checksum)
+                if dup:
+                    return dup
+            raise
 
         return {
             "id": file_id,
@@ -553,11 +591,15 @@ class SQLiteBackend(SQLiteMemoryMixin):
         }
 
     async def mark_file_failed(self, file_id: str, error: str) -> None:
-        await self._db.execute(
-            "UPDATE files SET status = 'failed', error_message = ? WHERE id = ?",
-            (error, file_id),
-        )
-        await self._db.commit()
+        # This is called from a *sibling* ingest worker's exception handler.
+        # It used to run unlocked and call commit() on the shared connection,
+        # which committed whatever transaction another worker had open.
+        async with self.write_txn() as conn:
+            await conn.execute(
+                "UPDATE files SET status = 'failed', error_message = ?, "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+                (error, file_id),
+            )
 
     # ------------------------------------------------------------------
     # Read
@@ -733,15 +775,18 @@ class SQLiteBackend(SQLiteMemoryMixin):
         add_sqlite_filters(conditions, params, filters)
         filter_clause = (" AND " + " AND ".join(conditions[1:])) if len(conditions) > 1 else ""
 
-        # Join pages table to get original text for Python-side highlighting
+        # Join pages table to get original text for Python-side highlighting.
+        # bm25() weights the derived `expansion` column at _EXPANSION_WEIGHT so
+        # a camelCase-split match can surface a document that would otherwise be
+        # unreachable, without ever outranking a literal hit in the body.
         search_sql = f"""
             SELECT f.filename, f.id AS file_id, p.page_number, p.section_title,
-                   p.text, pages_fts.rank, f.updated_at
+                   p.text, {_PAGES_BM25} AS rank, f.updated_at
             FROM pages_fts
             JOIN pages p ON pages_fts.rowid = p.id
             JOIN files f ON p.file_id = f.id
             WHERE pages_fts MATCH ? AND f.status = 'ready'{filter_clause}
-            ORDER BY pages_fts.rank
+            ORDER BY {_PAGES_BM25}
             LIMIT ? OFFSET ?
         """
         count_sql = f"""
@@ -884,14 +929,17 @@ class SQLiteBackend(SQLiteMemoryMixin):
         if not row:
             return None
         file_path = row["file_path"]
-        # Clean up standalone FTS5 index before cascade deletes pages
-        await self._db.execute(
-            "DELETE FROM pages_fts WHERE rowid IN "
-            "(SELECT id FROM pages WHERE file_id = ?)",
-            (file_id,),
-        )
-        await self._db.execute("DELETE FROM files WHERE id = ?", (file_id,))
-        await self._db.commit()
+        # Both statements in one transaction: pages_fts is a standalone FTS5
+        # table with no foreign key to pages, so a crash between the two used
+        # to leave orphaned FTS rows that still matched searches while the
+        # underlying file was gone.
+        async with self.write_txn() as conn:
+            await conn.execute(
+                "DELETE FROM pages_fts WHERE rowid IN "
+                "(SELECT id FROM pages WHERE file_id = ?)",
+                (file_id,),
+            )
+            await conn.execute("DELETE FROM files WHERE id = ?", (file_id,))
         return file_path
 
     # ------------------------------------------------------------------
@@ -961,22 +1009,22 @@ class SQLiteBackend(SQLiteMemoryMixin):
         latency_ms: int,
         metadata: dict,
     ) -> None:
-        await self._db.execute(
-            """
-            INSERT INTO eval_captures
-                (tool_name, query, result_ids, result_count, latency_ms, metadata)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                tool_name,
-                query[:51200],
-                json.dumps(result_ids),
-                result_count,
-                latency_ms,
-                json.dumps(metadata),
-            ),
-        )
-        await self._db.commit()
+        async with self.write_txn() as conn:
+            await conn.execute(
+                """
+                INSERT INTO eval_captures
+                    (tool_name, query, result_ids, result_count, latency_ms, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    tool_name,
+                    query[:51200],
+                    json.dumps(result_ids),
+                    result_count,
+                    latency_ms,
+                    json.dumps(metadata),
+                ),
+            )
 
     async def export_eval_captures(
         self,
@@ -1022,7 +1070,7 @@ class SQLiteBackend(SQLiteMemoryMixin):
     # ------------------------------------------------------------------
 
     async def _resolve_link_target(self, target: str) -> str | None:
-        async with self._db.execute(
+        async with self._wdb.execute(
             "SELECT id FROM files WHERE json_extract(metadata, '$.source_path') = ? "
             "AND status = 'ready'",
             (target,),
@@ -1032,7 +1080,7 @@ class SQLiteBackend(SQLiteMemoryMixin):
             return row["id"]
 
         suffix = target.replace("\\", "/").lstrip("/")
-        async with self._db.execute(
+        async with self._wdb.execute(
             "SELECT id FROM files WHERE json_extract(metadata, '$.source_path') LIKE ? "
             "AND status = 'ready' ORDER BY length(json_extract(metadata, '$.source_path')) LIMIT 1",
             (f"%/{suffix}",),
@@ -1043,7 +1091,7 @@ class SQLiteBackend(SQLiteMemoryMixin):
 
         basename = Path(target).name
         if basename:
-            async with self._db.execute(
+            async with self._wdb.execute(
                 "SELECT id FROM files WHERE filename = ? AND status = 'ready' LIMIT 1",
                 (basename,),
             ) as cur:
@@ -1053,7 +1101,7 @@ class SQLiteBackend(SQLiteMemoryMixin):
         return None
 
     async def _replace_file_links_unlocked(self, file_id: str, links: list[dict]) -> int:
-        await self._db.execute("DELETE FROM file_links WHERE from_file_id = ?", (file_id,))
+        await self._wdb.execute("DELETE FROM file_links WHERE from_file_id = ?", (file_id,))
         return await self._insert_file_links_unlocked(file_id, links)
 
     async def _insert_file_links_unlocked(self, file_id: str, links: list[dict]) -> int:
@@ -1070,7 +1118,7 @@ class SQLiteBackend(SQLiteMemoryMixin):
                 str(link.get("context") or "")[:500],
             ))
         if rows:
-            await self._db.executemany(
+            await self._wdb.executemany(
                 """
                 INSERT OR IGNORE INTO file_links
                     (from_file_id, to_file_id, target, link_type, context)
@@ -1081,7 +1129,7 @@ class SQLiteBackend(SQLiteMemoryMixin):
         return len(rows)
 
     async def _reconcile_links_to_file_unlocked(self, file_id: str) -> None:
-        async with self._db.execute(
+        async with self._wdb.execute(
             "SELECT filename, metadata FROM files WHERE id = ? AND status = 'ready'",
             (file_id,),
         ) as cur:
@@ -1093,7 +1141,7 @@ class SQLiteBackend(SQLiteMemoryMixin):
         filename = row["filename"]
         if not source_path and not filename:
             return
-        await self._db.execute(
+        await self._wdb.execute(
             """
             UPDATE file_links
             SET to_file_id = ?
@@ -1116,9 +1164,8 @@ class SQLiteBackend(SQLiteMemoryMixin):
         file_id: str,
         links: list[dict],
     ) -> int:
-        async with self._write_lock:
+        async with self.write_txn():
             count = await self._replace_file_links_unlocked(file_id, links)
-            await self._db.commit()
         return count
 
     async def get_backlink_counts(self, file_ids: list[str]) -> dict[str, int]:
@@ -1143,7 +1190,7 @@ class SQLiteBackend(SQLiteMemoryMixin):
         file_id: str,
         symbols: list[dict],
     ) -> int:
-        await self._db.execute("DELETE FROM code_symbols WHERE file_id = ?", (file_id,))
+        await self._wdb.execute("DELETE FROM code_symbols WHERE file_id = ?", (file_id,))
 
         rows = []
         for symbol in symbols:
@@ -1162,7 +1209,7 @@ class SQLiteBackend(SQLiteMemoryMixin):
             ))
         if not rows:
             return 0
-        await self._db.executemany(
+        await self._wdb.executemany(
             """
             INSERT INTO code_symbols
                 (file_id, name, kind, qualified_name, start_line, end_line, signature, docstring)
@@ -1255,3 +1302,132 @@ class SQLiteBackend(SQLiteMemoryMixin):
             ) as cur:
                 rows = await cur.fetchall()
         return [dict(r) for r in rows]
+
+
+# ======================================================================
+# Schema migrations
+# ======================================================================
+#
+# Each step is applied inside its own write_txn() together with the
+# user_version bump, so the version on disk is never left between two states.
+# Steps must be idempotent-safe to *skip*, not idempotent to re-run: the
+# version gate guarantees each runs at most once.
+
+
+async def _m1_memory_columns(backend: "SQLiteBackend", conn) -> None:
+    """Provenance / confidence columns on `memories` (was v1.1 + v1.6)."""
+    async with conn.execute("PRAGMA table_info(memories)") as cur:
+        cols = {row[1] for row in await cur.fetchall()}
+    if "memory_id" not in cols:
+        return  # fresh DB — _SCHEMA already created the current shape
+    for col, ddl in [
+        ("pinned", "ALTER TABLE memories ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"),
+        ("source", "ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"),
+        ("superseded_id", "ALTER TABLE memories ADD COLUMN superseded_id TEXT DEFAULT NULL"),
+        ("confidence", "ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0"),
+        ("last_accessed", "ALTER TABLE memories ADD COLUMN last_accessed TEXT DEFAULT NULL"),
+        ("access_count", "ALTER TABLE memories ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0"),
+    ]:
+        if col not in cols:
+            await conn.execute(ddl)
+
+
+async def _fts_column_count(conn, table: str) -> int:
+    """Number of user columns in an existing FTS5 table, or 0 if absent."""
+    async with conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = ? AND type = 'table'", (table,)
+    ) as cur:
+        row = await cur.fetchone()
+    if not row or not row[0]:
+        return 0
+    inner = row[0][row[0].find("(") + 1 : row[0].rfind(")")]
+    return len([c for c in inner.split(",") if c.strip()])
+
+
+async def _m2_two_column_fts(backend: "SQLiteBackend", conn) -> None:
+    """Rebuild both FTS tables with the derived `expansion` column.
+
+    Also subsumes the old content-table -> standalone FTS migration: whatever
+    shape `pages_fts` had, it is dropped and rebuilt from `pages`, which is the
+    authority. FTS content is fully derived, so a rebuild loses nothing.
+    """
+    from opendb_core.utils.tokenizer import expand_identifiers, tokenize_for_fts
+
+    # Legacy triggers from the content-table era would fire against a table
+    # that no longer exists.
+    for trig in ("pages_ai", "pages_ad", "pages_au"):
+        await conn.execute(f"DROP TRIGGER IF EXISTS {trig}")
+
+    if await _fts_column_count(conn, "pages_fts") != 2:
+        await conn.execute("DROP TABLE IF EXISTS pages_fts")
+        await conn.execute("CREATE VIRTUAL TABLE pages_fts USING fts5(text, expansion)")
+        async with conn.execute("SELECT id, text FROM pages ORDER BY id") as cur:
+            rows = await cur.fetchall()
+        if rows:
+            await conn.executemany(
+                "INSERT INTO pages_fts(rowid, text, expansion) VALUES (?, ?, ?)",
+                [
+                    (r["id"], tokenize_for_fts(r["text"]), expand_identifiers(r["text"]))
+                    for r in rows
+                ],
+            )
+        logger.info("Rebuilt pages_fts with identifier expansion (%d pages)", len(rows))
+
+    if await _fts_column_count(conn, "memories_fts") != 2:
+        await conn.execute("DROP TABLE IF EXISTS memories_fts")
+        await conn.execute(
+            "CREATE VIRTUAL TABLE memories_fts USING fts5(content, expansion)"
+        )
+        async with conn.execute("SELECT id, content FROM memories ORDER BY id") as cur:
+            rows = await cur.fetchall()
+        if rows:
+            await conn.executemany(
+                "INSERT INTO memories_fts(rowid, content, expansion) VALUES (?, ?, ?)",
+                [
+                    (
+                        r["id"],
+                        tokenize_for_fts(r["content"]),
+                        expand_identifiers(r["content"]),
+                    )
+                    for r in rows
+                ],
+            )
+        logger.info("Rebuilt memories_fts with identifier expansion (%d memories)", len(rows))
+
+
+async def _m3_backfill_code_symbols(backend: "SQLiteBackend", conn) -> None:
+    """One-time code-symbol backfill (used to re-run on every init())."""
+    await backend._backfill_code_symbols_if_needed()
+
+
+async def _m5_record_tokenizer_fingerprint(backend: "SQLiteBackend", conn) -> None:
+    """Stamp the tokenization the index was built with."""
+    from opendb_core.utils.tokenizer import tokenizer_fingerprint
+
+    await conn.execute(
+        "INSERT INTO opendb_meta (key, value) VALUES ('tokenizer_fingerprint', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        (tokenizer_fingerprint(),),
+    )
+
+
+async def _m4_drop_memories_updated_trigger(backend: "SQLiteBackend", conn) -> None:
+    """Remove the trigger that reset the time-decay clock on every read.
+
+    `memories_updated` fired `WHEN old.updated_at = new.updated_at`, so any
+    UPDATE that did not name the column silently set it to now(). The recall
+    path's reinforcement UPDATE did exactly that, and `updated_at` is what the
+    decay ranking reads.
+    """
+    await conn.execute("DROP TRIGGER IF EXISTS memories_updated")
+
+
+# (version, name, coroutine). Append only; never renumber.
+_MIGRATIONS = [
+    (1, "memory_provenance_columns", _m1_memory_columns),
+    (2, "two_column_fts_with_identifier_expansion", _m2_two_column_fts),
+    (3, "backfill_code_symbols", _m3_backfill_code_symbols),
+    (4, "drop_memories_updated_trigger", _m4_drop_memories_updated_trigger),
+    (5, "record_tokenizer_fingerprint", _m5_record_tokenizer_fingerprint),
+]

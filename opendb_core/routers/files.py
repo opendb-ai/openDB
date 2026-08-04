@@ -25,6 +25,9 @@ import opendb_core.parsers.image  # noqa: F401
 router = APIRouter(prefix="/files", tags=["files"])
 
 
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
 @router.post("")
 async def upload_file(
     file: UploadFile = File(...),
@@ -32,10 +35,21 @@ async def upload_file(
     metadata: str | None = Form(None),
 ) -> dict:
     """Upload and ingest a file."""
-    content = await file.read()
-
-    if len(content) > settings.max_file_size:
-        raise HTTPException(status_code=413, detail="File too large")
+    # Read in chunks and stop the moment the limit is exceeded. This used to be
+    # a bare `await file.read()` followed by a length check, so the entire body
+    # was already resident before the server decided it was too large — an
+    # unauthenticated caller could exhaust memory with a single request.
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
+        total += len(chunk)
+        if total > settings.max_file_size:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File exceeds the {settings.max_file_size} byte limit",
+            )
+        chunks.append(chunk)
+    content = b"".join(chunks)
 
     mime_type = magic.from_buffer(content[:2048], mime=True)
 

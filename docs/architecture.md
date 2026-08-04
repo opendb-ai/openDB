@@ -62,6 +62,7 @@ opendb_core/             Core library (backend-agnostic)
   storage/               Pluggable backends
     base.py              StorageBackend Protocol
     shared.py            Common helpers (highlight, filters, row converters)
+    _sqlite_txn.py       write_txn(): the single write-transaction primitive
     sqlite.py            aiosqlite + FTS5 (embedded, zero-config)
     postgres.py          asyncpg + tsvector (server, multi-user)
   middleware/
@@ -72,12 +73,6 @@ opendb_core/             Core library (backend-agnostic)
     tokenizer.py         CJK segmentation (jieba, pluggable)
     text.py              Line numbering, paragraph chunking
     hashing.py           SHA256 checksum
-
-app/                     FastAPI server entry point
-  main.py                Lifespan, middleware, router registration
-  config.py              Server-specific settings
-  database.py            Connection pool
-  routers/, services/, storage/  Server-specific wrappers
 
 mcp_server/              MCP stdio server
   server.py              FastMCP with 7 tools
@@ -133,8 +128,17 @@ Recall query
 ### SQLite (Embedded)
 
 - Zero-config: creates `.opendb/metadata.db` in workspace
-- FTS5 virtual tables (standalone, jieba-tokenized at ingestion)
-- WAL mode for concurrent reads
+- FTS5 virtual tables, two columns: `text`/`content` holds the tokenized body,
+  `expansion` holds derived forms (camelCase identifier splits) and is
+  down-weighted via `bm25(t, 1.0, 0.35)` so a derived match never outranks a
+  literal one
+- Separate reader and writer connections. Readers get a stable WAL snapshot and
+  cannot observe a writer's uncommitted rows
+- All writes go through `write_txn()`: `BEGIN IMMEDIATE`, rollback on any
+  `BaseException`, bounded retry with jitter on `SQLITE_BUSY`
+- `PRAGMA user_version` drives forward migrations; each step commits atomically
+  with its version bump
+- WAL mode, explicit `busy_timeout=10000`, `synchronous=NORMAL`
 - Best for: local agents, single-user, CJK-heavy workloads
 
 ### PostgreSQL (Server)
@@ -159,10 +163,13 @@ All settings use `FILEDB_` env prefix:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `FILEDB_BACKEND` | `postgres` | Storage backend (`sqlite` or `postgres`) |
+| `FILEDB_BACKEND` | `sqlite` | Storage backend (`sqlite` embedded, or `postgres`) |
 | `FILEDB_DATABASE_URL` | `postgresql://...` | PostgreSQL connection string |
 | `FILEDB_MEMORY_DECAY_HALFLIFE_DAYS` | `30.0` | Memory recall time-decay half-life |
-| `FILEDB_AUTH_API_KEY` | (empty) | API key for authentication |
+| `FILEDB_AUTH_API_KEY` | (empty) | API key for authentication (enforced by `ApiKeyMiddleware`) |
+| `FILEDB_HOST` | `127.0.0.1` | Bind address — loopback by default |
+| `FILEDB_CORS_ORIGINS` | `[]` | Allowed CORS origins — none by default |
+| `FILEDB_VISION_ENABLED` | `false` | Opt-in: sends indexed images to OpenRouter |
 | `FILEDB_TOKENIZER` | `jieba` | Tokenizer for CJK text |
 | `FILEDB_MAX_FILE_SIZE` | 100 MB | Max upload size |
 | `FILEDB_OCR_LANGUAGES` | `eng+chi_sim+chi_tra` | Tesseract OCR languages |

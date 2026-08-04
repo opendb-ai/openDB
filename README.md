@@ -18,7 +18,7 @@
 
 <p align="center">
   <b>Purpose-built long-term memory for coding agents.</b><br/>
-  <b>96.3%</b> on CodeMemEval (coding-agent memory) · <b>100% R@5</b> retrieval · <b>0.8 ms</b> recall · <b>93.6%</b> on LongMemEval.<br/>
+  <b>79.1% R@5</b> retrieval on a pooled 882-session corpus · <b>7.5 ms</b> median recall · <b>96.3%</b> on CodeMemEval (n=27).<br/>
   Remember architecture decisions, conventions, APIs, and bug fixes across sessions —
   and read the actual code. Zero embedding APIs. Zero vector databases. Just SQLite FTS5 and good engineering.
 </p>
@@ -51,8 +51,8 @@ evolves. **CodeMemEval** is OpenDB's purpose-built benchmark for exactly that.
 | | Result |
 |---|---|
 | **E2E accuracy** | **92.6%** with a cheap reader (gpt-5.4-mini) · **96.3%** with gpt-5.5 |
-| **Retrieval R@5** | **100%** — right evidence in top-5 for every question |
-| **Median recall** | **0.8 ms** |
+| **Retrieval R@5** | **79.1%** on the pooled LongMemEval corpus (880 distractors/question) |
+| **Median recall** | **7.5 ms** at 882 sessions |
 | **Anti-hallucination (abstention)** | **100%** — never invents facts not in memory |
 
 Perfect (100%) on architecture, conventions, API signatures, bug-fixes, code
@@ -74,7 +74,22 @@ extensible — add facts to grow coverage.
 
 ## LongMemEval Benchmark — 93.6%
 
-OpenDB achieves **93.6% E2E accuracy** on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (ICLR 2025), the standard benchmark for AI agent long-term memory. 500 questions, 6 categories, LLM-as-judge evaluation. Memory **retrieval recall is a reproduced 100% R@5** (470/470, 0 misses) after the rank-aware recall fix described in the report.
+OpenDB scores **93.6% E2E accuracy** on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (ICLR 2025). 500 questions, 6 categories, LLM-as-judge evaluation.
+
+> **Read this before comparing the number.** The E2E harness gives each question
+> its own database holding only that question's evidence sessions. In
+> `benchmark/longmemeval_oracle.json` all 500 questions satisfy
+> `set(haystack_session_ids) == set(answer_session_ids)` with a mean of 1.896
+> sessions and **zero distractors**, so retrieval cannot fail and 93.6% measures
+> the reader given gold evidence, not the memory system. Earlier releases of
+> this README reported "100% R@5" from that same harness; that figure was a
+> property of the instrument and has been withdrawn.
+>
+> Run `python benchmark/longmemeval_bench.py --pooled` for the retrieval number:
+> it indexes every question's sessions into one 882-session corpus, so each
+> query faces ~880 distractors. **R@5 there is 79.1%** (see below). Comparisons
+> against systems evaluated on the full LongMemEval haystack should use the
+> pooled figure.
 
 | System | LongMemEval E2E | Gen Model | Retrieval Infrastructure |
 |--------|:-:|-----------|--------------------------|
@@ -101,23 +116,52 @@ OpenDB achieves **93.6% E2E accuracy** on [LongMemEval](https://github.com/xiaow
 | abstention | 86.7% | — | — | — |
 | single-session-preference | 73.3% | — | 70.0% | 56.7% |
 
-OpenDB **beats every competitor** on temporal-reasoning (95.5% vs OMEGA's 94%), knowledge-update (97.4% vs 96%), and multi-session (89.5% vs 83%) — without embeddings, without vector databases, without graph databases.
+> These per-category numbers come from the same distractor-free harness described
+> above, and the competitor columns are quoted from those systems' own
+> publications rather than reproduced here. Treat cross-system gaps of a few
+> points as noise: at n=500 the 95% binomial CI on 93.6% is roughly ±2.2 points,
+> and the per-category denominators are far smaller.
 
-### Retrieval — 100% Recall
+### Retrieval — pooled corpus
 
-| | OpenDB (FTS5) | MemPalace (ChromaDB) |
-|---|:---:|:---:|
-| **R@5** | **100%** (470/470) | 96.6% |
-| Embedding model | None | all-MiniLM-L6-v2 |
-| API calls | 0 | 0 |
-| Median recall latency | **1.1 ms** | — |
+Measured with `benchmark/longmemeval_bench.py --pooled`: all 470 non-abstention
+questions' sessions indexed into **one** 882-session store, so every query
+competes against ~880 distractor sessions.
+
+| | OpenDB (FTS5) |
+|---|:---:|
+| **R@1** | 52.1% (245/470) |
+| **R@3** | 70.4% (331/470) |
+| **R@5** | **79.1%** (372/470) |
+| **R@10** | 86.4% (406/470) |
+| Embedding model | None |
+| API calls | 0 |
+| Median recall latency | 7.5 ms (p95 22.5 ms) |
+
+Where it is strong and where it is not — this is the lexical thesis showing its
+shape, and the weak row is the honest one:
+
+| Category | R@5 |
+|---|:---:|
+| single-session-assistant | 100.0% |
+| knowledge-update | 93.1% |
+| multi-session | 77.7% |
+| single-session-user | 76.6% |
+| temporal-reasoning | 76.4% |
+| **single-session-preference** | **30.0%** |
+
+Preference questions are the paraphrase case — the question and the stored answer
+share intent but few tokens — which is exactly where pure lexical retrieval is
+structurally blind. The MemPalace/ChromaDB 96.6% figure previously compared here
+was measured on a different corpus and is not comparable to this one; it has been
+removed rather than restated.
 
 ### How?
 
 No embeddings. No vector search. No graph databases. Three things:
 
-1. **SQLite FTS5** — BM25 keyword search with time-decay re-ranking. 1ms recall at 10K memories.
-2. **Smart conflict detection** — Automatically supersedes outdated facts while preserving episodic event history.
+1. **SQLite FTS5** — BM25 keyword search with time-decay re-ranking, plus camelCase identifier decomposition in a down-weighted FTS column. ~7ms median recall on a 882-session corpus; ~1ms on a few hundred memories.
+2. **Non-destructive conflict detection** — Supersedes outdated facts only on an explicit update phrase or a near-duplicate, never across differently-dated events, and archives every prior version to `memory_revisions` so `memory_history()` can recover it.
 3. **Temporal-aware prompting** — Memories sorted chronologically with real session dates, giving the LLM the context it needs for temporal reasoning.
 
 Full methodology and per-question results: [benchmark/REPORT.md](benchmark/REPORT.md)
@@ -557,7 +601,7 @@ Search time scales **sublinearly** (10x docs -> 1.7x latency).
 - **12 MCP tools** — `read`, `search`, `glob`, `info` for files; `memory_store`, `memory_recall`, `memory_forget` for memory; `list_workspaces`, `use_workspace`, `add_workspace`, `remove_workspace`, `current_workspace` for multi-project workspace switching
 - **Runtime workspace switching** — agents can list/add/switch workspaces at runtime with no server restart; already-opened workspaces switch in sub-millisecond
 - **93.6% LongMemEval** — #3 on the leaderboard with a cheap model and zero retrieval infrastructure
-- **100% R@5 retrieval** — Perfect memory recall, 1.1ms median latency, zero embedding API calls
+- **79.1% R@5 retrieval** on a pooled 882-session corpus, 7.5ms median latency, zero embedding API calls
 - **Dual-mode** — Embedded (SQLite, zero-config) or Server (PostgreSQL, shared access); same API
 - **Real-time sync** — Directories are watched via OS-native events after indexing
 - **Full-text search** — FTS5 / tsvector with jieba CJK tokenization

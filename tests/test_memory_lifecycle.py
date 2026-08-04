@@ -257,8 +257,10 @@ class TestConfidenceDecay:
 
 class TestRecallReinforcement:
     @pytest.mark.asyncio
-    async def test_recall_increments_access_count(self, backend) -> None:
-        """Recalling a memory should increment its access_count."""
+    async def test_recall_is_read_only(self, backend) -> None:
+        """Recall must not write. It used to reinforce every hit inline, which
+        (a) reset confidence to 1.0, defeating the decay model, and (b) tripped
+        the memories_updated trigger, resetting the time-decay clock."""
         await backend.store_memory(
             memory_id="reinf-1",
             content="The database password rotation schedule is weekly",
@@ -266,27 +268,31 @@ class TestRecallReinforcement:
             tags=[],
             metadata={},
         )
-
-        # First recall
-        await backend.recall_memories(
-            query="database password rotation",
-            memory_type=None, tags=None, limit=10, offset=0,
-        )
-
-        # Check access_count was bumped
-        mem = await backend.get_memory("reinf-1")
-        # get_memory doesn't return access_count directly, but we can check via raw SQL
         async with backend._db.execute(
-            "SELECT access_count, last_accessed FROM memories WHERE memory_id = ?",
+            "SELECT access_count, last_accessed, updated_at, confidence "
+            "FROM memories WHERE memory_id = ?",
             ("reinf-1",),
         ) as cur:
-            row = await cur.fetchone()
-        assert row["access_count"] == 1
-        assert row["last_accessed"] is not None
+            before = dict(await cur.fetchone())
+
+        for _ in range(5):
+            await backend.recall_memories(
+                query="database password rotation",
+                memory_type=None, tags=None, limit=10, offset=0,
+            )
+
+        async with backend._db.execute(
+            "SELECT access_count, last_accessed, updated_at, confidence "
+            "FROM memories WHERE memory_id = ?",
+            ("reinf-1",),
+        ) as cur:
+            after = dict(await cur.fetchone())
+
+        assert after == before, "recall_memories must leave the row untouched"
 
     @pytest.mark.asyncio
-    async def test_multiple_recalls_accumulate(self, backend) -> None:
-        """Multiple recalls should accumulate access_count."""
+    async def test_explicit_reinforcement_accumulates(self, backend) -> None:
+        """Reinforcement is now an explicit call, and it accumulates."""
         await backend.store_memory(
             memory_id="reinf-2",
             content="The CI pipeline uses GitHub Actions with Node 24",
@@ -295,19 +301,16 @@ class TestRecallReinforcement:
             metadata={},
         )
 
-        # Recall 3 times
         for _ in range(3):
-            await backend.recall_memories(
-                query="CI pipeline GitHub Actions",
-                memory_type=None, tags=None, limit=10, offset=0,
-            )
+            await backend.reinforce_memories(["reinf-2"])
 
         async with backend._db.execute(
-            "SELECT access_count FROM memories WHERE memory_id = ?",
+            "SELECT access_count, last_accessed FROM memories WHERE memory_id = ?",
             ("reinf-2",),
         ) as cur:
             row = await cur.fetchone()
         assert row["access_count"] == 3
+        assert row["last_accessed"] is not None
 
     @pytest.mark.asyncio
     async def test_supersede_resets_confidence(self, backend) -> None:
@@ -647,10 +650,14 @@ class TestPinnedOnlyPath:
 # Recall reinforcement resets forgetting curve
 # ------------------------------------------------------------------
 
-class TestReinforcementResetsCurve:
+class TestReinforcementDoesNotDefeatDecay:
     @pytest.mark.asyncio
-    async def test_recall_resets_confidence_to_one(self, backend) -> None:
-        """After recall, stored confidence should be reset to 1.0."""
+    async def test_recall_does_not_reset_confidence(self, backend) -> None:
+        """Recall must not restore a decayed memory's confidence.
+
+        Resetting to 1.0 on every hit made the FSRS curve a no-op for anything
+        ever retrieved: it could only demote memories nobody read.
+        """
         await backend.store_memory(
             memory_id="reset-1",
             content="The API endpoint for user auth is /api/v2/auth",
@@ -658,14 +665,12 @@ class TestReinforcementResetsCurve:
             tags=[],
             metadata={},
         )
-        # Simulate partial decay
-        await backend._db.execute(
+        await backend._wdb.execute(
             "UPDATE memories SET confidence = 0.7 WHERE memory_id = ?",
             ("reset-1",),
         )
-        await backend._db.commit()
+        await backend._wdb.commit()
 
-        # Recall should reinforce → reset confidence to 1.0
         await backend.recall_memories(
             query="API endpoint user auth",
             memory_type=None, tags=None, limit=10, offset=0,
@@ -676,11 +681,16 @@ class TestReinforcementResetsCurve:
             ("reset-1",),
         ) as cur:
             row = await cur.fetchone()
-        assert row["confidence"] == 1.0, "Recall should reset confidence to 1.0"
+        assert row["confidence"] == pytest.approx(0.7)
 
     @pytest.mark.asyncio
-    async def test_reinforcement_updates_last_accessed(self, backend) -> None:
-        """Recall should update last_accessed timestamp."""
+    async def test_explicit_reinforcement_preserves_decay_clock(self, backend) -> None:
+        """Reinforcement records a review without moving `updated_at`.
+
+        `updated_at` is what the time-decay ranking reads. The old trigger
+        bumped it on any UPDATE that did not name it, so reviewing a memory
+        made a stale fact look brand new.
+        """
         await backend.store_memory(
             memory_id="ts-1",
             content="The deployment schedule is every Tuesday at 3pm",
@@ -688,24 +698,28 @@ class TestReinforcementResetsCurve:
             tags=[],
             metadata={},
         )
-
-        # Get initial state
+        # Backdate the fact so a reset would be unmistakable.
+        await backend._wdb.execute(
+            "UPDATE memories SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now','-400 days') "
+            "WHERE memory_id = ?",
+            ("ts-1",),
+        )
+        await backend._wdb.commit()
         async with backend._db.execute(
-            "SELECT last_accessed FROM memories WHERE memory_id = ?",
+            "SELECT last_accessed, updated_at FROM memories WHERE memory_id = ?",
             ("ts-1",),
         ) as cur:
             before = await cur.fetchone()
-        assert before["last_accessed"] is None, "New memory should have NULL last_accessed"
+        assert before["last_accessed"] is None
 
-        # Recall to trigger reinforcement
-        await backend.recall_memories(
-            query="deployment schedule Tuesday",
-            memory_type=None, tags=None, limit=10, offset=0,
-        )
+        await backend.reinforce_memories(["ts-1"])
 
         async with backend._db.execute(
-            "SELECT last_accessed FROM memories WHERE memory_id = ?",
+            "SELECT last_accessed, updated_at FROM memories WHERE memory_id = ?",
             ("ts-1",),
         ) as cur:
             after = await cur.fetchone()
-        assert after["last_accessed"] is not None, "Recall should set last_accessed"
+        assert after["last_accessed"] is not None, "reinforcement should record the review"
+        assert after["updated_at"] == before["updated_at"], (
+            "reinforcement must not move the time-decay clock"
+        )

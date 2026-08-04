@@ -24,5 +24,23 @@ def get_parser(mime_type: str) -> FileParser:
 
 
 def parse_file(file_path: Path, mime_type: str) -> ParseResult:
+    """Parse *file_path*, enforcing resource bounds first.
+
+    Every parser here receives attacker-influenced bytes, and the size limit on
+    the compressed input says nothing about what the parser will allocate. The
+    checks live at this single dispatch point so no parser can be reached
+    without them.
+    """
+    from opendb_core.parsers.limits import (
+        check_page_count,
+        check_zip_container,
+        configure_pillow,
+    )
+
+    configure_pillow()
+    check_zip_container(file_path)
+
     parser = get_parser(mime_type)
-    return parser.parse(file_path)
+    result = parser.parse(file_path)
+    check_page_count(len(result.pages), file_path)
+    return result
