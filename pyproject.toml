@@ -49,6 +49,13 @@ mcp = [
 integration = [
     "httpx>=0.28.0",
 ]
+# Real parsing for symbol extraction. Without it the regex/AST extractor still
+# runs, but it only sees top-level declarations in Python and the JS family and
+# nothing at all in Go, Rust, Java, C#, Ruby, PHP or C/C++.
+code = [
+    "tree-sitter>=0.23.0",
+    "tree-sitter-language-pack>=0.7.0",
+]
 # Embedded mode: SQLite backend + CLI + vision
 embedded = [
     "aiosqlite>=0.19.0",

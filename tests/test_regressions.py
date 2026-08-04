@@ -878,3 +878,114 @@ class TestBitemporalFactLog:
         await _store(backend, "Some unrelated note about the build cache.")
         res = await backend.recall_as_of("nonexistent topic", "2020-01-01T00:00:00Z")
         assert res["results"] == []
+
+
+# ======================================================================
+# Symbol extraction
+# ======================================================================
+
+_TS = pytest.importorskip("tree_sitter_language_pack", reason="pip install open-db[code]")
+
+
+class TestTreeSitterSymbols:
+    """The regex extractor saw only top-level declarations in the JS family and
+    produced nothing at all for Go, Rust, Java, C#, Ruby, PHP or C/C++ — most of
+    the languages a coding agent works in."""
+
+    CASES = {
+        "billing.go": (
+            "package main\n"
+            "func CreateInvoice(id string) error { return nil }\n"
+            "type Billing struct{}\n"
+            "func (b *Billing) Charge() {}\n",
+            {"CreateInvoice", "Billing", "Charge"},
+        ),
+        "invoice.rs": (
+            "pub struct Invoice { id: u32 }\n"
+            "impl Invoice { pub fn total(&self) -> u32 { 0 } }\n"
+            "pub fn create_invoice() {}\n",
+            {"Invoice", "total", "create_invoice"},
+        ),
+        "Billing.java": (
+            "public class Billing {\n"
+            "  public void createInvoice(String id) {}\n"
+            "  private int total() { return 0; }\n"
+            "}\n",
+            {"Billing", "createInvoice", "total"},
+        ),
+        "gateway.ts": (
+            "export class Gateway {\n"
+            "  async createInvoice(id: string) {}\n"
+            "}\n"
+            "export const rateLimiter = async () => {};\n"
+            "export function parseHTTPResponse() {}\n",
+            {"Gateway", "createInvoice", "rateLimiter", "parseHTTPResponse"},
+        ),
+        "Billing.cs": (
+            "namespace App { public class Billing { public void CreateInvoice() {} } }\n",
+            {"Billing", "CreateInvoice"},
+        ),
+        "invoice.rb": (
+            "class Invoice\n  def total\n    0\n  end\nend\n",
+            {"Invoice", "total"},
+        ),
+    }
+
+    @pytest.mark.parametrize("filename", sorted(CASES))
+    def test_language_symbols_are_extracted(self, filename) -> None:
+        from opendb_core.utils.treesitter_intel import extract_symbols
+
+        source, expected = self.CASES[filename]
+        symbols = extract_symbols(source, filename=filename)
+        assert symbols is not None, f"no grammar for {filename}"
+        assert expected <= {s["name"] for s in symbols}
+
+    def test_methods_are_qualified_by_their_class(self) -> None:
+        """The regex extractor had no notion of scope."""
+        from opendb_core.utils.treesitter_intel import extract_symbols
+
+        symbols = extract_symbols(
+            "public class Billing { public void createInvoice() {} }\n",
+            filename="Billing.java",
+        )
+        qualified = {s["qualified_name"] for s in symbols}
+        assert "Billing.createInvoice" in qualified
+
+    def test_spans_are_real_line_ranges(self) -> None:
+        """Staleness detection needs an exact span, not a guess at where a
+        definition ends."""
+        from opendb_core.utils.treesitter_intel import extract_symbols
+
+        src = "package main\n\nfunc A() {\n\tx := 1\n\t_ = x\n}\n\nfunc B() {}\n"
+        by_name = {s["name"]: s for s in extract_symbols(src, filename="m.go")}
+        assert by_name["A"]["start_line"] == 3
+        assert by_name["A"]["end_line"] == 6
+        assert by_name["B"]["start_line"] == 8
+
+    def test_hashes_track_signature_and_body_separately(self) -> None:
+        """sig_hash must change only when the declaration changes; span_hash on
+        any edit inside the symbol. That distinction is what lets a stale
+        anchor say *how* the code moved."""
+        from opendb_core.utils.treesitter_intel import extract_symbols
+
+        base = extract_symbols("func A(x int) {\n\ty := 1\n}\n", filename="m.go")[0]
+        body = extract_symbols("func A(x int) {\n\ty := 2\n}\n", filename="m.go")[0]
+        sig = extract_symbols("func A(x string) {\n\ty := 1\n}\n", filename="m.go")[0]
+
+        assert body["sig_hash"] == base["sig_hash"]
+        assert body["span_hash"] != base["span_hash"]
+        assert sig["sig_hash"] != base["sig_hash"]
+
+    def test_unknown_language_returns_none_not_empty(self) -> None:
+        """None means "no parser"; [] means "parsed, found nothing". The caller
+        needs to tell those apart to know whether to fall back."""
+        from opendb_core.utils.treesitter_intel import extract_symbols
+
+        assert extract_symbols("hello", filename="notes.txt") is None
+
+    def test_go_files_now_count_as_code(self) -> None:
+        from opendb_core.utils.code_intel import is_code_path
+
+        assert is_code_path("main.go")
+        assert is_code_path("lib.rs")
+        assert not is_code_path("README.md")
