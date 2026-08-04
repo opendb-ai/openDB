@@ -116,10 +116,22 @@ CREATE TABLE IF NOT EXISTS memories (
     tags          TEXT NOT NULL DEFAULT '[]',
     metadata      TEXT NOT NULL DEFAULT '{}',
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    -- Bitemporal validity. valid_* is when the fact held in the world; tx_* is
+    -- when this system believed it. A NULL valid_to means "still current", so
+    -- the default recall predicate is an index lookup, not a scan.
+    valid_from    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    valid_to      TEXT DEFAULT NULL,
+    tx_from       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    tx_to         TEXT DEFAULT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
+-- NOTE: the index on (valid_to, valid_from) is created by migration 6, not
+-- here. On a database written by an older release the `memories` table already
+-- exists, so `CREATE TABLE IF NOT EXISTS` above is a no-op and the bitemporal
+-- columns do not exist yet — indexing them from _SCHEMA would abort the whole
+-- script before any migration had a chance to add them.
 CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at DESC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(content, expansion);
@@ -149,6 +161,8 @@ CREATE INDEX IF NOT EXISTS idx_memory_revisions_mid
     ON memory_revisions(memory_id, valid_to DESC);
 CREATE INDEX IF NOT EXISTS idx_memory_revisions_by
     ON memory_revisions(superseded_by);
+CREATE INDEX IF NOT EXISTS idx_memory_revisions_validity
+    ON memory_revisions(valid_from, valid_to);
 
 -- NOTE: there is deliberately no `memories_updated` trigger.
 --
@@ -1423,6 +1437,40 @@ async def _m4_drop_memories_updated_trigger(backend: "SQLiteBackend", conn) -> N
     await conn.execute("DROP TRIGGER IF EXISTS memories_updated")
 
 
+async def _m6_bitemporal_validity(backend: "SQLiteBackend", conn) -> None:
+    """Make fact validity queryable, not just archived.
+
+    Two timelines, following the bitemporal model:
+
+    * **valid time** (`valid_from`, `valid_to`) -- when the fact held in the
+      world. This is what "what was true in March" asks about.
+    * **transaction time** (`tx_from`, `tx_to`) -- when this system believed it.
+      Needed to distinguish "we were wrong in March" from "it changed in March".
+
+    Superseding sets the outgoing row's `valid_to`; it never deletes. Recall
+    filters to `valid_to IS NULL` by default, so current-state queries are
+    unchanged, and `as_of=` turns the same index into a time-travel query.
+    """
+    cols = {r[1] for r in await (await conn.execute("PRAGMA table_info(memories)")).fetchall()}
+    for col, ddl in (
+        ("valid_from", "ALTER TABLE memories ADD COLUMN valid_from TEXT"),
+        ("valid_to", "ALTER TABLE memories ADD COLUMN valid_to TEXT DEFAULT NULL"),
+        ("tx_from", "ALTER TABLE memories ADD COLUMN tx_from TEXT"),
+        ("tx_to", "ALTER TABLE memories ADD COLUMN tx_to TEXT DEFAULT NULL"),
+    ):
+        if col not in cols:
+            await conn.execute(ddl)
+    # Existing rows are currently valid, and were believed from creation.
+    await conn.execute(
+        "UPDATE memories SET valid_from = COALESCE(valid_from, created_at), "
+        "tx_from = COALESCE(tx_from, created_at)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memories_validity "
+        "ON memories(valid_to, valid_from)"
+    )
+
+
 # (version, name, coroutine). Append only; never renumber.
 _MIGRATIONS = [
     (1, "memory_provenance_columns", _m1_memory_columns),
@@ -1430,4 +1478,5 @@ _MIGRATIONS = [
     (3, "backfill_code_symbols", _m3_backfill_code_symbols),
     (4, "drop_memories_updated_trigger", _m4_drop_memories_updated_trigger),
     (5, "record_tokenizer_fingerprint", _m5_record_tokenizer_fingerprint),
+    (6, "bitemporal_validity", _m6_bitemporal_validity),
 ]

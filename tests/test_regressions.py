@@ -788,3 +788,93 @@ class TestDoctor:
         report = await run_diagnostics(backend)
         skew = [c for c in report.checks if c.name == "tokenizer_fingerprint"]
         assert skew and skew[0].status == "fail"
+
+
+# ======================================================================
+# Bitemporal validity
+# ======================================================================
+
+class TestBitemporalFactLog:
+    @pytest.mark.asyncio
+    async def test_supersede_closes_the_validity_interval(self, backend) -> None:
+        """Destructive supersede could not answer "what was true in March" at
+        all — the March value was gone. Validity makes it a range predicate."""
+        await _store(backend, "The API rate limit is 100 requests per minute.")
+        await _store(backend, "The API rate limit is now 200 requests per minute. "
+                              "We changed it.", memory_id="rl-new")
+
+        async with backend._db.execute(
+            "SELECT valid_from, valid_to FROM memories WHERE memory_id = ?",
+            ("rl-new",),
+        ) as cur:
+            live = await cur.fetchone()
+        assert live["valid_from"] is not None
+        assert live["valid_to"] is None, "the current fact must be open-ended"
+
+        history = await backend.memory_history("rl-new")
+        assert len(history) == 1
+        assert history[0]["valid_from"] is not None
+        assert history[0]["valid_to"] is not None, (
+            "the superseded fact must have a closed interval"
+        )
+
+    @pytest.mark.asyncio
+    async def test_as_of_returns_what_was_believed_then(self, backend) -> None:
+        await _store(backend, "The API rate limit is 100 requests per minute.")
+        # Backdate the first fact's validity so the two intervals are distinct.
+        await backend._wdb.execute(
+            "UPDATE memories SET valid_from = '2026-01-01T00:00:00Z', "
+            "tx_from = '2026-01-01T00:00:00Z'"
+        )
+        await backend._wdb.commit()
+        await _store(backend, "The API rate limit is now 200 requests per minute. "
+                              "We changed it.", memory_id="rl-new")
+        # The revision inherits the backdated valid_from and closes at now.
+        await backend._wdb.execute(
+            "UPDATE memory_revisions SET valid_from = '2026-01-01T00:00:00Z', "
+            "valid_to = '2026-04-01T00:00:00Z'"
+        )
+        await backend._wdb.execute(
+            "UPDATE memories SET valid_from = '2026-04-01T00:00:00Z' "
+            "WHERE memory_id = 'rl-new'"
+        )
+        await backend._wdb.commit()
+
+        march = await backend.recall_as_of("API rate limit", "2026-03-01T00:00:00Z")
+        assert march["results"], "nothing was valid in March"
+        assert "100" in march["results"][0]["content"]
+        assert march["results"][0]["still_current"] is False
+
+        today = await backend.recall_as_of("API rate limit", "2026-12-01T00:00:00Z")
+        assert "200" in today["results"][0]["content"]
+        assert today["results"][0]["still_current"] is True
+
+    @pytest.mark.asyncio
+    async def test_default_recall_only_sees_current_facts(self, backend) -> None:
+        """Adding validity must not change what a normal recall returns."""
+        await _store(backend, "The API rate limit is 100 requests per minute.")
+        await _store(backend, "The API rate limit is now 200 requests per minute. "
+                              "We changed it.")
+        res = await backend.recall_memories("API rate limit", None, None, 10, 0)
+        contents = " ".join(r["content"] for r in res["results"])
+        assert "200" in contents
+        assert "100" not in contents
+
+    @pytest.mark.asyncio
+    async def test_transaction_time_is_recorded_separately(self, backend) -> None:
+        """valid time answers "when was it true"; transaction time answers "when
+        did we believe it". Without both, "we were wrong in March" and "it
+        changed in March" are indistinguishable."""
+        mid = await _store(backend, "The gateway listens on port 8080.")
+        async with backend._db.execute(
+            "SELECT valid_from, tx_from FROM memories WHERE memory_id = ?", (mid,)
+        ) as cur:
+            row = await cur.fetchone()
+        assert row["valid_from"] is not None
+        assert row["tx_from"] is not None
+
+    @pytest.mark.asyncio
+    async def test_as_of_with_no_match_is_empty_not_an_error(self, backend) -> None:
+        await _store(backend, "Some unrelated note about the build cache.")
+        res = await backend.recall_as_of("nonexistent topic", "2020-01-01T00:00:00Z")
+        assert res["results"] == []

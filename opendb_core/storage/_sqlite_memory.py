@@ -197,29 +197,37 @@ class SQLiteMemoryMixin:
                 # existed — a dangling pointer, not provenance.
                 async with conn.execute(
                     "SELECT memory_id, content, memory_type, tags, metadata, "
-                    "source, updated_at FROM memories WHERE id = ?",
+                    "source, updated_at, created_at, valid_from "
+                    "FROM memories WHERE id = ?",
                     (conflict_id,),
                 ) as cur:
                     old = await cur.fetchone()
                 if old is not None:
+                    # The outgoing fact stopped being true now; the incoming
+                    # one starts now. Closing the interval rather than deleting
+                    # is what makes "what was true in March" a range query.
                     await conn.execute(
                         """
                         INSERT INTO memory_revisions
                             (memory_id, content, memory_type, tags, metadata,
-                             source, superseded_by, valid_from)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                             source, superseded_by, valid_from, valid_to)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                                strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
                         """,
                         (
                             old["memory_id"], old["content"], old["memory_type"],
                             old["tags"], old["metadata"], old["source"],
-                            memory_id, old["updated_at"],
+                            memory_id, old["valid_from"] or old["created_at"],
                         ),
                     )
                 await conn.execute(
                     "UPDATE memories SET content = ?, memory_id = ?, tags = ?, "
                     "metadata = ?, pinned = ?, source = ?, superseded_id = ?, "
                     "confidence = 1.0, last_accessed = NULL, access_count = 0, "
-                    "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+                    "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
+                    "valid_from = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
+                    "valid_to = NULL, "
+                    "tx_from = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
                     "WHERE id = ?",
                     (content, memory_id, json.dumps(tags), json.dumps(metadata),
                      int(pinned), source, superseded_mid, conflict_id),
@@ -288,6 +296,99 @@ class SQLiteMemoryMixin:
     # ------------------------------------------------------------------
     # Recall reinforcement (fire-and-forget update after recall)
     # ------------------------------------------------------------------
+
+    async def recall_as_of(
+        self,
+        query: str,
+        as_of: str,
+        *,
+        memory_type: str | None = None,
+        limit: int = 10,
+    ) -> dict:
+        """What this store believed to be true at *as_of* (ISO-8601 UTC).
+
+        The payoff of keeping validity intervals instead of overwriting. A
+        destructive supersede cannot answer "what was the rate limit in March?"
+        at all -- the March value is gone. Here it is a range predicate over two
+        sources: rows still current as of that instant, and revisions whose
+        validity interval covered it.
+
+        Ranking is deliberately plain relevance: time-decay would be incoherent
+        when the caller has already pinned the instant they care about.
+        """
+        from opendb_core.utils.tokenizer import tokenize_for_fts
+
+        fts_query = escape_fts5(tokenize_for_fts(query), use_or=True)
+        if not fts_query.strip():
+            return {"as_of": as_of, "total": 0, "results": []}
+
+        type_clause = " AND m.memory_type = ?" if memory_type else ""
+        params: list = [fts_query]
+        if memory_type:
+            params.append(memory_type)
+
+        # Live rows whose validity interval contains as_of.
+        live_sql = f"""
+            SELECT m.memory_id, m.content, m.memory_type, m.tags, m.metadata,
+                   m.source, m.valid_from, m.valid_to, {_MEM_BM25} AS fts_rank
+            FROM memories_fts
+            JOIN memories m ON memories_fts.rowid = m.id
+            WHERE memories_fts MATCH ?{type_clause}
+              AND m.valid_from <= ?
+              AND (m.valid_to IS NULL OR m.valid_to > ?)
+            ORDER BY {_MEM_BM25}
+            LIMIT ?
+        """
+        async with self._db.execute(
+            live_sql, [*params, as_of, as_of, limit * 3]
+        ) as cur:
+            live = await cur.fetchall()
+
+        # Superseded versions that were current at as_of. These are not in the
+        # FTS index (it tracks current content), so match in SQL.
+        rev_sql = f"""
+            SELECT memory_id, content, memory_type, tags, metadata, source,
+                   valid_from, valid_to
+            FROM memory_revisions
+            WHERE valid_from <= ? AND valid_to > ?
+            {"AND memory_type = ?" if memory_type else ""}
+            ORDER BY valid_to DESC
+            LIMIT ?
+        """
+        rev_params: list = [as_of, as_of]
+        if memory_type:
+            rev_params.append(memory_type)
+        async with self._db.execute(rev_sql, [*rev_params, limit * 3]) as cur:
+            revisions = await cur.fetchall()
+
+        terms = content_token_set(query)
+        results = []
+        for r in live:
+            results.append({
+                "memory_id": r["memory_id"], "content": r["content"],
+                "memory_type": r["memory_type"],
+                "tags": json.loads(r["tags"]) if r["tags"] else [],
+                "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
+                "source": r["source"], "valid_from": r["valid_from"],
+                "valid_to": r["valid_to"], "still_current": r["valid_to"] is None,
+                "score": abs(float(r["fts_rank"])),
+            })
+        for r in revisions:
+            overlap = len(terms & content_token_set(r["content"]))
+            if not overlap:
+                continue
+            results.append({
+                "memory_id": r["memory_id"], "content": r["content"],
+                "memory_type": r["memory_type"],
+                "tags": json.loads(r["tags"]) if r["tags"] else [],
+                "metadata": json.loads(r["metadata"]) if r["metadata"] else {},
+                "source": r["source"], "valid_from": r["valid_from"],
+                "valid_to": r["valid_to"], "still_current": False,
+                "score": float(overlap),
+            })
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return {"as_of": as_of, "total": len(results), "results": results[:limit]}
 
     async def reinforce_memories(self, memory_ids: list[str]) -> None:
         """Record an explicit review of *memory_ids* (FSRS-style reinforcement).
