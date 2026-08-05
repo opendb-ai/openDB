@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Benchmark methodology — the judge is measured, and it is not clean
+
+The CodeMemEval accuracies were graded by an LLM judge that nothing had ever
+validated. It is now measured, against 24 hand-written plausible-but-false
+answers covering all 17 facts, plus 24 correct-answer controls:
+
+| Judge | False accept | 95% CI | False reject |
+|---|:-:|:-:|:-:|
+| **`gpt-5.4-mini`** — grades the published numbers | **1/24 (4.2%)** | [0.7%, 20.2%] | 0/24 |
+| `claude-sonnet-5` — different model family | 0/24 (0.0%) | [0.0%, 13.8%] | 0/24 |
+
+The accepted answer was on `loc_protos`: gold says generated stubs are
+**committed** and never hand-edited, the candidate said they are **gitignored
+and regenerated per developer**. Right paths, inverted policy, graded correct.
+
+At a 4.2% false-accept rate over 27 questions, about one graded answer is
+expected to be wrong-but-accepted — the entire margin between the 96.3% and
+92.6% rows. Both remain **upper bounds**, now for a measured reason rather than
+an unexamined one. README and REPORT say so.
+
+- **The adversarial set grew from 10 to 24** and now covers all 17 facts rather
+  than 7. This is the finding that justifies the module's own thesis: at n = 10
+  *both* judges scored a flawless 0/10 and the 95% upper bound was still 27.8%.
+  The defect appeared only after widening the set, which is exactly the small-n
+  error the module was written to name.
+- **A cross-family judge was added as a check on the "generator, reader and
+  judge share a lineage" objection.** It is *stricter*, not more lenient: the
+  two judges agree on 23 of 24 adversarial cases and on all 24 controls, so on
+  this evidence shared lineage does not appear to be inflating the score.
+
 ### Benchmark methodology — the ranking suite could not select a ranking weight
 
 `benchmark/tune_ranking.py` exists to choose the ranking constants. It could

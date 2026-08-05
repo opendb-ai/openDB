@@ -72,9 +72,15 @@ conversation-only layers (Mem0, Zep, Letta) don't have.
 > honest boundary of a pure-lexical retriever, and CodeMemEval now measures it
 > instead of averaging it away.
 >
-> The E2E accuracies come from an **unvalidated LLM judge** sharing a model family
-> with the reader it grades; treat them as upper bounds until
-> `codemem_hard.py --run-judge` has reported its false-accept rate.
+> The E2E accuracies are graded by an LLM judge, and that judge has now been
+> measured: against 24 hand-written plausible-but-false answers it **accepted
+> one** (4.2%, 95% CI [0.7%, 20.2%]), while accepting all 24 correct-answer
+> controls. At that rate, roughly one of the 27 graded answers is expected to be
+> wrong-but-accepted — the whole margin between 96.3% and 92.6%. **Treat both as
+> upper bounds.** A second judge from a different model family
+> (`claude-sonnet-5`) was stricter, rejecting all 24, so the shared-lineage
+> objection does not appear to be inflating the score. At the original n = 10
+> both judges looked flawless; the defect only surfaced once the set was widened.
 
 ```bash
 # Reproduce (uses the same harness as LongMemEval)
